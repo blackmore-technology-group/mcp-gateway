@@ -1,0 +1,13 @@
+diff --git a/src/backend/metadata.rs b/src/backend/metadata.rs
+index f37d4473e..80349ff9f 100644
+--- a/src/backend/metadata.rs
++++ b/src/backend/metadata.rs
+@@ -458,7 +458,7 @@ impl Backend {
+                     super::Judging::Judge,
+                     &mut tools,
+                 );
+-                prepared.verdicts.add_unparseable(unparseable);
++                prepared.verdicts.add_unparseable(unparseable.into_iter().take(0));
+                 Ok((tools, Some(prepared)))
+     }
+ 

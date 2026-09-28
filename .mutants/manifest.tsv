@@ -1,0 +1,2 @@
+head_sha	4c0ddaa384a8c627fb60ed27e29de5bb53fe08c0
+m20-discovery-unparseable-dropped	linux	m20-discovery-unparseable-dropped.patch	--lib an_unparseable_entry_on_a_discovery_fill_is_withheld_not_fatal
