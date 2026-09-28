@@ -1,0 +1,8 @@
+head_sha	4c0ddaa384a8c627fb60ed27e29de5bb53fe08c0
+m2-call-hook-skips-block	linux	m2-call-hook-skips-block.patch	--lib t2_a_listed_poisoned_tool_is_refused_by_name
+m3-block-after-enforcement-off	linux	m3-block-after-enforcement-off.patch	--lib t3_refusal_holds_with_argument_key_enforcement_off
+m10-block-per-slot	linux	m10-block-per-slot.patch	--lib x1_a_name_withheld_for_one_caller_is_refused_to_a_cold_caller
+m7-direct-route-unfiltered	linux	m7-direct-route-unfiltered.patch	--lib t1_a_poisoned_tool_is_served_on_no_surface
+m27-error-frame-keeps-result	linux	m27-error-frame-keeps-result.patch	--lib an_error_frame_never_carries_an_unjudged_tool_list
+m16-unreadable-page-ignored	linux	m16-unreadable-page-ignored.patch	--lib keyless_continuation_page_marks_truncated
+m17-withheld-slot-never-refreshed	linux	m17-withheld-slot-never-refreshed.patch	--lib a_shared_slot_withholding_every_tool_still_refreshes_past_its_ttl

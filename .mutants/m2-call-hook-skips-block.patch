@@ -1,0 +1,13 @@
+diff --git a/src/backend/input_keys.rs b/src/backend/input_keys.rs
+index 2743b6fb5..93b68e355 100644
+--- a/src/backend/input_keys.rs
++++ b/src/backend/input_keys.rs
+@@ -83,7 +83,7 @@ impl Backend {
+     ) -> crate::Result<Option<String>> {
+         // Before the enforcement mode: a withheld tool is refused whatever
+         // the argument-key setting, and for every caller (#1441).
+-        if let Some(refusal) = self.blocked_tool_refusal(identity_key, tool) {
++        if let Some(refusal) = self.blocked_tool_refusal(identity_key, tool).filter(|_| false) {
+             return Ok(Some(refusal));
+         }
+         let mode = self.config.input_schema_enforcement;

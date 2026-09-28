@@ -1,0 +1,26 @@
+diff --git a/src/gateway/router/backend_handlers.rs b/src/gateway/router/backend_handlers.rs
+index 78a99e530..81a59deb8 100644
+--- a/src/gateway/router/backend_handlers.rs
++++ b/src/gateway/router/backend_handlers.rs
+@@ -229,8 +229,6 @@ fn normalize_tools_list_response(
+ ) {
+     let backend_name = backend.name.as_str();
+     if response.error.is_some() {
+-        // Never forward an unjudged list beside an error (#1441).
+-        response.result = None;
+         return;
+     }
+ 
+diff --git a/src/gateway/router/backend_handlers/direct_list.rs b/src/gateway/router/backend_handlers/direct_list.rs
+index 412bb36f7..a4c8e6c15 100644
+--- a/src/gateway/router/backend_handlers/direct_list.rs
++++ b/src/gateway/router/backend_handlers/direct_list.rs
+@@ -75,7 +75,7 @@ pub(super) async fn drain(
+         if page.error.is_some() {
+             // An error frame is forwarded as an error only: a `result` beside
+             // it was never judged, so it must not reach the client (#1441).
+-            page.result = None;
++            page.result = page.result.take();
+             return Ok(page);
+         }
+         let readable = readable_page(page.result.as_ref());

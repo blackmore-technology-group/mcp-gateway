@@ -1,0 +1,21 @@
+diff --git a/src/backend/input_keys.rs b/src/backend/input_keys.rs
+index 2743b6fb5..bd442a621 100644
+--- a/src/backend/input_keys.rs
++++ b/src/backend/input_keys.rs
+@@ -83,13 +83,13 @@ impl Backend {
+     ) -> crate::Result<Option<String>> {
+         // Before the enforcement mode: a withheld tool is refused whatever
+         // the argument-key setting, and for every caller (#1441).
+-        if let Some(refusal) = self.blocked_tool_refusal(identity_key, tool) {
+-            return Ok(Some(refusal));
+-        }
+         let mode = self.config.input_schema_enforcement;
+         if mode == InputSchemaEnforcement::Off {
+             return Ok(None);
+         }
++        if let Some(refusal) = self.blocked_tool_refusal(identity_key, tool) {
++            return Ok(Some(refusal));
++        }
+         // A4: a hit is judged from the cache while the slot is fresh; a stale
+         // hit refreshes once, and falls back to the held schema (design E)
+         // when it cannot: no list is allowed, the failsafe refuses it, the

@@ -1,0 +1,13 @@
+diff --git a/src/gateway/meta_mcp/discovery_fetch.rs b/src/gateway/meta_mcp/discovery_fetch.rs
+index 1fd351dec..05cd2e1ed 100644
+--- a/src/gateway/meta_mcp/discovery_fetch.rs
++++ b/src/gateway/meta_mcp/discovery_fetch.rs
+@@ -124,7 +124,7 @@ impl MetaMcp {
+         // A populated shared slot whose every tool is withheld reads empty here;
+         // it must still refresh on TTL, or a description fixed upstream stays
+         // hidden from search forever (#1441).
+-        if tools.is_empty() && binding.is_none() && backend.cached_tools_known() {
++        if false && tools.is_empty() && binding.is_none() && backend.cached_tools_known() {
+             Self::refresh_stale_backend_tools_in_background(backend);
+         }
+         if !tools.is_empty() {

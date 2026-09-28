@@ -1,0 +1,11 @@
+diff --git a/src/backend/list_drain.rs b/src/backend/list_drain.rs
+index 430db1663..a663205fb 100644
+--- a/src/backend/list_drain.rs
++++ b/src/backend/list_drain.rs
+@@ -130,5 +130,5 @@ pub(super) async fn drain_list_pages(
+             "Backend list drain stopped early; catalogue truncated"
+         );
+     }
+-    Ok((merged, stop.is_some() || unreadable))
++    Ok((merged, stop.is_some() || (unreadable && false)))
+ }

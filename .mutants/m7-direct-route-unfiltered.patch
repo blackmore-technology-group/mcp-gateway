@@ -1,0 +1,26 @@
+diff --git a/src/gateway/router/backend_handlers.rs b/src/gateway/router/backend_handlers.rs
+index 78a99e530..f5029fa77 100644
+--- a/src/gateway/router/backend_handlers.rs
++++ b/src/gateway/router/backend_handlers.rs
+@@ -273,7 +273,7 @@ fn normalize_tools_list_response(
+         crate::backend::Judging::AlreadyJudged,
+         &mut tools,
+     );
+-    tools.retain(|tool| !backend.is_blocked_tool(&tool.name));
++    tools.retain(|_| true);
+ 
+     let server_id = format!("backend:{backend_name}");
+     let tools = project_tool_descriptors_trust_cards(&server_id, backend_name, &tools);
+diff --git a/src/gateway/router/backend_handlers/direct_list.rs b/src/gateway/router/backend_handlers/direct_list.rs
+index 412bb36f7..e5a7f529e 100644
+--- a/src/gateway/router/backend_handlers/direct_list.rs
++++ b/src/gateway/router/backend_handlers/direct_list.rs
+@@ -98,7 +98,7 @@ pub(super) async fn drain(
+                 // Dropped here, from the raw list this drain judged, not by a
+                 // later read of the backend's blocked set, which a concurrent
+                 // listing may change before the response is sent (#1441).
+-                tools.retain(|tool| {
++                tools.retain(|tool| true || {
+                     tool.get("name")
+                         .and_then(Value::as_str)
+                         .is_none_or(|name| !withheld.contains(name))
