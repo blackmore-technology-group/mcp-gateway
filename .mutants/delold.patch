@@ -1,0 +1,13 @@
+diff --git a/src/gateway/router/handlers.rs b/src/gateway/router/handlers.rs
+index 2b930cde7..ce78f49dd 100644
+--- a/src/gateway/router/handlers.rs
++++ b/src/gateway/router/handlers.rs
+@@ -329,7 +329,7 @@ pub(super) async fn mcp_delete_handler(
+     }
+     let session_id = session_id_header(&headers);
+     let owner = match request_session_owner(&state, &headers, &extensions, client.as_ref()).await {
+-        Ok((_, owner)) => owner,
++        Ok(_) => crate::gateway::session_id::SessionOwner::Anonymous,
+         Err(refusal) => return refusal,
+     };
+ 

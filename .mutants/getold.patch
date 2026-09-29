@@ -1,0 +1,13 @@
+diff --git a/src/gateway/router/handlers.rs b/src/gateway/router/handlers.rs
+index 2b930cde7..c6560a4b8 100644
+--- a/src/gateway/router/handlers.rs
++++ b/src/gateway/router/handlers.rs
+@@ -227,7 +227,7 @@ pub(super) async fn mcp_sse_handler(
+     // The owner the POST that minted the session used, so a subject resumes
+     // its own stream and nobody else's.
+     let owner = match request_session_owner(&state, &headers, &extensions, client.as_ref()).await {
+-        Ok((_, owner)) => owner,
++        Ok(_) => crate::gateway::session_id::SessionOwner::Anonymous,
+         Err(refusal) => return refusal,
+     };
+     // Check if streaming is enabled

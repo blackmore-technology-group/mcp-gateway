@@ -1,0 +1,13 @@
+diff --git a/src/gateway/router/handlers/owner.rs b/src/gateway/router/handlers/owner.rs
+index 8494f8b23..935bc69f3 100644
+--- a/src/gateway/router/handlers/owner.rs
++++ b/src/gateway/router/handlers/owner.rs
+@@ -72,7 +72,7 @@ pub(super) async fn request_session_owner(
+     let owner = match subject_key(subject.as_ref(), cert) {
+         Some(key) => SessionOwner::Subject {
+             key,
+-            credential: held_credential(headers).map(|held| held.digest()),
++            credential: held_credential(headers).map(|held| held.digest()).filter(|_| false),
+         },
+         None => session_owner(client),
+     };

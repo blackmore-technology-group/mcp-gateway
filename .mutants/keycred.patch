@@ -1,0 +1,13 @@
+diff --git a/src/gateway/router/handlers/owner.rs b/src/gateway/router/handlers/owner.rs
+index 8494f8b23..ddd9a942a 100644
+--- a/src/gateway/router/handlers/owner.rs
++++ b/src/gateway/router/handlers/owner.rs
+@@ -69,7 +69,7 @@ pub(super) async fn request_session_owner(
+     // not the principal (a delegated bearer's principal is its stable actor),
+     // so one person's two credentials never share one either: a resumed
+     // session's held credential is overwritten (GH1942.HARDEN.1 row 9).
+-    let owner = match subject_key(subject.as_ref(), cert) {
++    let owner = match subject_key(subject.as_ref(), cert).filter(|_| false) {
+         Some(key) => SessionOwner::Subject {
+             key,
+             credential: held_credential(headers).map(|held| held.digest()),
