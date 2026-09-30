@@ -1,0 +1,17 @@
+diff --git a/src/gateway/server/mod.rs b/src/gateway/server/mod.rs
+index 15641b94e..adae819eb 100644
+--- a/src/gateway/server/mod.rs
++++ b/src/gateway/server/mod.rs
+@@ -3318,10 +3318,8 @@ impl Gateway {
+                 Ok(super::meta_mcp::admission::SyncAdmission::Owned(lease)) => Some(lease),
+                 Ok(super::meta_mcp::admission::SyncAdmission::Replay(response, audit)) => {
+                     // #2480: a replay is a delivered call, recorded as its first run was.
+-                    let (args, session) = (arguments.as_ref(), Some(session_id));
+-                    break 'tool_call meta_mcp
+-                        .audit_replay(&tool_name, args, session, &caller, response, audit)
+-                        .await;
++                    let _ = audit;
++                    break 'tool_call response;
+                 }
+                 Err(error) => {
+                     break 'tool_call JsonRpcResponse::error(

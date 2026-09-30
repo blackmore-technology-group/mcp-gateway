@@ -1,0 +1,13 @@
+diff --git a/src/gateway/meta_mcp/invoke/audit.rs b/src/gateway/meta_mcp/invoke/audit.rs
+index f9c06cb17..90a4ee652 100644
+--- a/src/gateway/meta_mcp/invoke/audit.rs
++++ b/src/gateway/meta_mcp/invoke/audit.rs
+@@ -387,7 +387,7 @@ impl MetaMcp {
+             ("gateway_invoke", Some(result)) => invoke_value(result),
+             _ => None,
+         };
+-        let delivered = unwrapped.as_ref().or(replay.result.as_ref());
++        let delivered = replay.result.as_ref().or(unwrapped.as_ref());
+         let arguments = crate::gateway::meta_mcp_helpers::parse_tool_arguments(&envelope);
+         let tenants = self.request_tenants(arguments.as_ref().unwrap_or(&Value::Null));
+         let attribution = DispatchNotes {
