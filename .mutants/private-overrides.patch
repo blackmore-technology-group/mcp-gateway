@@ -1,0 +1,15 @@
+diff --git a/src/gateway/auth_handoff.rs b/src/gateway/auth_handoff.rs
+index f0992c874..ba9234eab 100644
+--- a/src/gateway/auth_handoff.rs
++++ b/src/gateway/auth_handoff.rs
+@@ -114,9 +114,7 @@ pub(crate) fn private(mut response: Response) -> Response {
+     let headers = response.headers_mut();
+     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+     // A page that set its own policy keeps it: the code form needs one.
+-    headers
+-        .entry(header::REFERRER_POLICY)
+-        .or_insert(HeaderValue::from_static("no-referrer"));
++    headers.insert(header::REFERRER_POLICY, HeaderValue::from_static("no-referrer"));
+     response
+ }
+ 

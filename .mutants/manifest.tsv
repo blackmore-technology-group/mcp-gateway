@@ -1,0 +1,4 @@
+head_sha	cbaa652cd886c58bef4b5eb5274111e11f813e65
+# batch 4 (delta) for #2130 (PR #2462) on the head above
+FORMNOREF	linux	form-no-referrer.patch	--lib gateway::router::e5_dashboard_session_tests::handoff::the_code_form_is_served_on_the_public_origin -- --exact
+PRIVOVERRIDE	linux	private-overrides.patch	--lib gateway::router::e5_dashboard_session_tests::handoff::the_code_form_is_served_on_the_public_origin -- --exact
