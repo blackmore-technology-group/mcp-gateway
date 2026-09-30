@@ -1,0 +1,13 @@
+diff --git a/src/gateway/router/hardened_identity.rs b/src/gateway/router/hardened_identity.rs
+index 776f16373..1d271676a 100644
+--- a/src/gateway/router/hardened_identity.rs
++++ b/src/gateway/router/hardened_identity.rs
+@@ -29,7 +29,7 @@ pub(super) fn hardened_identity_refusal(
+     subject_key: Option<&str>,
+     api_key: Option<&NamedApiKey>,
+ ) -> Option<(StatusCode, Json<Value>)> {
+-    let hardened = state.live_config.running().security.posture == SecurityPosture::Hardened;
++    let hardened = state.live_config.running().security.posture != SecurityPosture::Standard || true;
+     let identified = subject_key.is_some() || api_key.is_some_and(NamedApiKey::is_personal);
+     (hardened && !identified)
+         .then(|| build_http_error_response(None, -32600, REFUSAL, StatusCode::FORBIDDEN))

@@ -1,0 +1,7 @@
+head_sha	13a5557fef22d087eec246efebfe115624e06f18
+# batch 1 for #2465 (GH1942.HARDEN.1 rows 8, 16) on the head above
+ANYPOST	linux	anypost.patch	--lib gateway::router::hardened_identity_tests::standard_posture_serves_a_shared_key -- --exact
+SHAREDOK	linux	sharedok.patch	--lib gateway::router::hardened_identity_tests::hardened_refuses_without_subject_meta -- --exact
+NOSUBJECT	linux	nosubject.patch	--lib gateway::router::hardened_identity_tests::hardened_admits_a_proven_subject -- --exact
+NODIRECT	linux	nodirect.patch	--lib gateway::router::hardened_identity_tests::hardened_refuses_without_subject_direct -- --exact
+NOMETA	linux	nometa.patch	--lib gateway::router::hardened_identity_tests::hardened_refuses_without_subject_meta -- --exact

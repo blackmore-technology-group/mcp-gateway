@@ -1,0 +1,13 @@
+diff --git a/src/gateway/router/handlers/owner.rs b/src/gateway/router/handlers/owner.rs
+index 5674cfbdf..30429f6a4 100644
+--- a/src/gateway/router/handlers/owner.rs
++++ b/src/gateway/router/handlers/owner.rs
+@@ -68,7 +68,7 @@ pub(super) async fn request_session_owner(
+     .map_err(|refusal| identity_refusal_response(refusal).into_response())?;
+     let key = subject_key(subject.as_ref(), cert);
+     if let Some(refusal) =
+-        hardened_identity_refusal(state, key.as_deref(), extensions.get::<NamedApiKey>())
++        hardened_identity_refusal(state, key.as_deref(), extensions.get::<NamedApiKey>()).filter(|_| false)
+     {
+         return Err(refusal.into_response());
+     }
