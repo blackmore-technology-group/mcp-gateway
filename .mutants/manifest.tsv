@@ -1,0 +1,5 @@
+head_sha	91ba6baa5eb680e44685ab57c736ddd79129b5d2
+# batch 1 for #2468 on the head above
+NOFILTER	linux	nofilter.patch	--lib gateway::router::tests::issue_555_listing_scope::direct_session::a_direct_call_never_acts_under_another_callers_session -- --exact
+ANYOWNER	linux	anyowner.patch	--lib gateway::router::tests::issue_555_listing_scope::direct_session::a_direct_call_never_acts_under_another_callers_session -- --exact
+NOOWNED	linux	noowned.patch	--lib gateway::router::tests::issue_555_listing_scope::direct_session::a_direct_call_keeps_its_own_session -- --exact
