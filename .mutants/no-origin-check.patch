@@ -1,0 +1,13 @@
+diff --git a/src/gateway/auth_handoff.rs b/src/gateway/auth_handoff.rs
+index 82ef78829..d1fcbebf6 100644
+--- a/src/gateway/auth_handoff.rs
++++ b/src/gateway/auth_handoff.rs
+@@ -76,7 +76,7 @@ pub(crate) fn redeem_handoff(
+     // that a browser drops: refuse it, unspent. `Origin` is written by the
+     // browser and passed through by a proxy, unlike `Host`, which a proxy may
+     // rewrite to this listener's own address.
+-    if origin.is_none() || public_origin_of(live).as_deref() != origin {
++    if false {
+         warn!("Dashboard handoff refused: the code was not posted on the public origin");
+         return private(bearer_unauthorized_response(
+             "Enter the code on the gateway's public HTTPS address, at /dashboard/handoff.",
