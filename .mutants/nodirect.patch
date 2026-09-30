@@ -1,0 +1,13 @@
+diff --git a/src/gateway/router/backend_handlers.rs b/src/gateway/router/backend_handlers.rs
+index df6c73315..86fc46475 100644
+--- a/src/gateway/router/backend_handlers.rs
++++ b/src/gateway/router/backend_handlers.rs
+@@ -603,7 +603,7 @@ async fn backend_handler_inner(
+     };
+     let key = super::identity::subject_key(grant_subject.as_ref(), cert_identity.as_ref());
+     let named = request.extensions().get::<NamedApiKey>();
+-    if let Some(refusal) = hardened_identity_refusal(&state, key.as_deref(), named) {
++    if let Some(refusal) = hardened_identity_refusal(&state, key.as_deref(), named).filter(|_| false) {
+         return refusal;
+     }
+ 

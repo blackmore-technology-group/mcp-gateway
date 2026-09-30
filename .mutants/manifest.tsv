@@ -1,0 +1,3 @@
+head_sha	401edc69dd6815d05718b186b99b619d851a5a05
+# batch 2 for #2465: NODIRECT re-run (batch 1 baseline was red on a removed alias row)
+NODIRECT	linux	nodirect.patch	--lib gateway::router::hardened_identity_tests::hardened_refuses_without_subject_direct -- --exact
