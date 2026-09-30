@@ -1,0 +1,13 @@
+diff --git a/src/security/posture.rs b/src/security/posture.rs
+index b77da5b64..ff7a300c3 100644
+--- a/src/security/posture.rs
++++ b/src/security/posture.rs
+@@ -78,7 +78,7 @@ pub(crate) fn resolve(config: &mut Config, build: FirewallBuild) -> Result<()> {
+         ));
+     }
+     // #1881: the egress proxy is a route out the destination policy cannot see.
+-    if config.capabilities.egress_proxy.is_some() {
++    if false && config.capabilities.egress_proxy.is_some() {
+         return Err(Error::ConfigValidation(
+             "security.posture=hardened refuses capabilities.egress_proxy: capability traffic \
+              through a proxy bypasses the destination policy; remove the key or set \

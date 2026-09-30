@@ -1,0 +1,3 @@
+head_sha	c6a85f5addf068511eea248cc1a0a9baa815fb16
+# batch 1 for #2491 on the head above
+NOPROXY	linux	noproxy.patch	--lib security::posture::tests::hardened_refuses_capability_egress_proxy -- --exact
