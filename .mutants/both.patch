@@ -1,0 +1,22 @@
+diff --git a/src/cost_accounting/mod.rs b/src/cost_accounting/mod.rs
+index b6ab29581..db81f78a7 100644
+--- a/src/cost_accounting/mod.rs
++++ b/src/cost_accounting/mod.rs
+@@ -493,7 +493,7 @@ impl CostTracker {
+ 
+         // Per-session. An empty id is no session (a 2026-07-28 request has
+         // none): keying on it would pool every such caller into one bucket.
+-        if !session_id.is_empty() {
++        if true || !session_id.is_empty() {
+             self.per_session
+                 .entry(session_id.to_string())
+                 .or_insert_with(|| {
+@@ -524,7 +524,7 @@ impl CostTracker {
+     /// Snapshot the cost for a session.
+     #[must_use]
+     pub fn session_snapshot(&self, session_id: &str) -> Option<SessionCostSnapshot> {
+-        if session_id.is_empty() {
++        if false && session_id.is_empty() {
+             return None;
+         }
+         self.per_session.get(session_id).map(|sc| sc.snapshot())

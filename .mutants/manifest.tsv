@@ -1,0 +1,4 @@
+head_sha	91c7eb74c9f8d8c99f8582717f2ceab15673361e
+# batch 1 for #2448 on the head above; a snapshot-guard-only mutant is equivalent (no empty-id bucket can exist)
+RECORDANY	linux	recordany.patch	--lib cost_accounting::tests::an_empty_session_id_opens_no_session_bucket -- --exact
+BOTH	linux	both.patch	--lib gateway::router::tests::issue_555_listing_scope::cost_scope::a_cost_report_shows_no_other_callers_spend -- --exact

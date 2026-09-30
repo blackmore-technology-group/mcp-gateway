@@ -1,0 +1,13 @@
+diff --git a/src/cost_accounting/mod.rs b/src/cost_accounting/mod.rs
+index b6ab29581..dd6d2be9b 100644
+--- a/src/cost_accounting/mod.rs
++++ b/src/cost_accounting/mod.rs
+@@ -493,7 +493,7 @@ impl CostTracker {
+ 
+         // Per-session. An empty id is no session (a 2026-07-28 request has
+         // none): keying on it would pool every such caller into one bucket.
+-        if !session_id.is_empty() {
++        if true || !session_id.is_empty() {
+             self.per_session
+                 .entry(session_id.to_string())
+                 .or_insert_with(|| {
