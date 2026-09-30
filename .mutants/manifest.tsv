@@ -1,0 +1,3 @@
+head_sha	d3a8e1767c6e2eb24e3d34cfad4af4d2e6502878
+# batch 5: origin delta re-run on the head with the corrected test (the d6b9567ce run survived against the old test)
+NOORIGIN	linux	no-origin-check.patch	--lib gateway::router::e5_dashboard_session_tests::handoff::a_code_posted_on_the_loopback_origin_is_not_spent -- --exact
