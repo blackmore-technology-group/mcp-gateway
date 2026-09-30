@@ -1,0 +1,13 @@
+diff --git a/src/gateway/auth.rs b/src/gateway/auth.rs
+index c28685c21..1a5067d6c 100644
+--- a/src/gateway/auth.rs
++++ b/src/gateway/auth.rs
+@@ -754,7 +754,7 @@ pub async fn auth_middleware(
+             .dashboard_bootstrap
+             .check_session(&handle, Now::read(), &limits, touch)
+         {
+-            SessionCheck::Valid if !has_authorization && !is_bootstrap => {
++            SessionCheck::Valid if !has_authorization => {
+                 request.extensions_mut().insert(dashboard_client());
+                 return next.run(request).await;
+             }

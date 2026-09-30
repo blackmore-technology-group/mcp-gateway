@@ -1,0 +1,14 @@
+diff --git a/src/gateway/ui/session.rs b/src/gateway/ui/session.rs
+index e430ec6bb..c6d21701b 100644
+--- a/src/gateway/ui/session.rs
++++ b/src/gateway/ui/session.rs
+@@ -41,8 +41,7 @@ pub fn logout_router() -> Router<Arc<AppState>> {
+         .route(
+             crate::gateway::auth::HANDOFF_PATH,
+             get(handoff_form).post(handoff_code),
+-        )
+-        .layer(axum::middleware::map_response(handoff_private));
++        );
+     Router::new()
+         .route(LOGOUT_PATH, post(logout))
+         .merge(handoff)

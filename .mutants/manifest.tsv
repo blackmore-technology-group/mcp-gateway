@@ -1,0 +1,5 @@
+head_sha	858c2e43b4b6d13fdc29365a46b793727356d4e0
+# batch 2 (delta) for #2130 (PR #2462) on the head above
+NOBOOTGUARD	linux	no-bootstrap-guard.patch	--lib gateway::router::e5_dashboard_session_tests::handoff::a_link_redeemed_with_a_live_cookie_is_spent -- --exact
+BOOTNOTPRIVATE	linux	bootstrap-not-private.patch	--lib gateway::router::e5_dashboard_session_tests::handoff::a_link_redeemed_with_a_live_cookie_is_spent -- --exact
+NOLAYER	linux	no-handoff-layer.patch	--lib gateway::router::e5_dashboard_session_tests::handoff::a_wrong_method_on_the_code_path_is_private_too -- --exact

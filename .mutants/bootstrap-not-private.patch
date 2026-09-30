@@ -1,0 +1,13 @@
+diff --git a/src/gateway/auth.rs b/src/gateway/auth.rs
+index c28685c21..7bc472bcb 100644
+--- a/src/gateway/auth.rs
++++ b/src/gateway/auth.rs
+@@ -865,7 +865,7 @@ async fn authenticate_request(
+     // no cookie yet, so this is the one path where a credential arrives in the
+     // URL — which is why the value is single-use and is not the admin token.
+     if let Some(response) = try_dashboard_bootstrap(&state, &request) {
+-        return handoff::private(response);
++        return response;
+     }
+ 
+     let token = presented_credential(request.headers());
