@@ -1,0 +1,13 @@
+diff --git a/src/gateway/server/mod.rs b/src/gateway/server/mod.rs
+index 9b993f5a2..2ca450703 100644
+--- a/src/gateway/server/mod.rs
++++ b/src/gateway/server/mod.rs
+@@ -3174,7 +3174,7 @@ impl Gateway {
+             grant_subject: None,
+             verified_identity: None,
+             // The one client this process serves, for binding continuations.
+-            stdio_nonce: Some(StdioNonce::process()),
++            stdio_nonce: None,
+             // Same `RequestShape` the `initialize` arm advertises against.
+             era: request_shape.era(),
+             // The serve loop's own channel: a stdio client reads the same

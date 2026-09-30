@@ -1,0 +1,13 @@
+diff --git a/src/gateway/meta_mcp/invoke.rs b/src/gateway/meta_mcp/invoke.rs
+index eafc05d4b..4e018b8a6 100644
+--- a/src/gateway/meta_mcp/invoke.rs
++++ b/src/gateway/meta_mcp/invoke.rs
+@@ -1806,7 +1806,7 @@ impl MetaMcp {
+             dispatch_binding.as_deref(),
+             verified_identity,
+             caller.grant_subject.as_ref(),
+-            caller.owner_principal(),
++            caller.credential_principal,
+             caller.authentication,
+         );
+ 

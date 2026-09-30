@@ -1,0 +1,10 @@
+head_sha	ad24c47bc9044b581066043ab9752bc844204409
+# batch 2 for #2494 on the head above (MIK-7272.OWNER.3 / OWNER.5); batch 1 was on a head that did not compile
+M1	linux	m1.patch	--lib -- owner3_stdio_keying
+M2	linux	m2.patch	--lib -- owner3_stdio_keying
+M3	linux	m3.patch	--lib -- owner3_stdio_keying owner5_stdio_context
+M5	linux	m5.patch	--lib -- owner3_stdio_keying::a_chain_step_keeps_the_stdio_tag
+M6	linux	m6.patch	--lib -- owner5_stdio_context
+M7	linux	m7.patch	--lib -- owner5_stdio_context
+M8	linux	m8.patch	--lib -- owner3_stdio_keying::reserved_owner
+M10	linux	m10.patch	--lib -- the_stdio_principal_text_is_not_a_local_transport stdio_is_admitted_but_stays_distinguishable

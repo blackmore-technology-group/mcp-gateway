@@ -1,0 +1,13 @@
+diff --git a/src/gateway/meta_mcp/mod.rs b/src/gateway/meta_mcp/mod.rs
+index 318c637d3..1285c6e2e 100644
+--- a/src/gateway/meta_mcp/mod.rs
++++ b/src/gateway/meta_mcp/mod.rs
+@@ -272,7 +272,7 @@ impl<'a> MetaMcpCallerContext<'a> {
+             return Some(LOCAL_OPERATOR_PRINCIPAL);
+         }
+         self.credential_principal
+-            .filter(|text| !text.starts_with(LOCAL_OPERATOR_PREFIX))
++            .filter(|_| true)
+     }
+ 
+     /// How this caller was established. The stdio transport's mark decides

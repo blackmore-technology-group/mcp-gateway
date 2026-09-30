@@ -1,0 +1,13 @@
+diff --git a/src/gateway/meta_mcp/mod.rs b/src/gateway/meta_mcp/mod.rs
+index 318c637d3..f54b844af 100644
+--- a/src/gateway/meta_mcp/mod.rs
++++ b/src/gateway/meta_mcp/mod.rs
+@@ -314,7 +314,7 @@ impl<'a> MetaMcpCallerContext<'a> {
+             agent_declared: self.agent_declared,
+             grant_subject: self.grant_subject.clone(),
+             verified_identity: self.verified_identity,
+-            stdio_nonce: self.stdio_nonce,
++            stdio_nonce: None,
+             is_admin: self.is_admin,
+             input_capabilities: self.input_capabilities,
+             confirmation: self.confirmation.clone(),

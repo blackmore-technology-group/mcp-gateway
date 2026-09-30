@@ -1,0 +1,12 @@
+diff --git a/src/identity_propagation/caller_proof.rs b/src/identity_propagation/caller_proof.rs
+index a12fbb7fd..90d392348 100644
+--- a/src/identity_propagation/caller_proof.rs
++++ b/src/identity_propagation/caller_proof.rs
+@@ -53,6 +53,7 @@ impl CallerProvenance {
+     pub(crate) fn classify(credential_principal: Option<&str>) -> Self {
+         match credential_principal {
+             Some("") | None => Self::Anonymous,
++            Some("stdio") => Self::LocalTransport,
+             Some(_) => Self::Credential,
+         }
+     }

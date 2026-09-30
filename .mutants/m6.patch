@@ -1,0 +1,13 @@
+diff --git a/src/gateway/server/mod.rs b/src/gateway/server/mod.rs
+index 9b993f5a2..e401439af 100644
+--- a/src/gateway/server/mod.rs
++++ b/src/gateway/server/mod.rs
+@@ -3168,7 +3168,7 @@ impl Gateway {
+                 client.handshake_capabilities
+             },
+             retry,
+-            api_key_name: None,
++            api_key_name: Some("mutant-key"),
+             agent_id: None,
+             agent_declared: None,
+             grant_subject: None,
