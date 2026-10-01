@@ -1,0 +1,13 @@
+diff --git a/src/gateway/meta_mcp/invoke/audit.rs b/src/gateway/meta_mcp/invoke/audit.rs
+index f5168566c..10b327875 100644
+--- a/src/gateway/meta_mcp/invoke/audit.rs
++++ b/src/gateway/meta_mcp/invoke/audit.rs
+@@ -176,7 +176,7 @@ impl DispatchNotes {
+         let marker = match (self.cached, uninspected) {
+             (true, true) => Some("cached_delivery_uninspected"),
+             (true, false) => Some("cached_delivery"),
+-            (false, true) => Some("uninspected"),
++            (false, true) => None,
+             (false, false) => None,
+         };
+         if let Some(marker) = marker {

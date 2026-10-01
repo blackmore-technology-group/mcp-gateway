@@ -1,0 +1,13 @@
+diff --git a/src/gateway/meta_mcp/chain_receipt.rs b/src/gateway/meta_mcp/chain_receipt.rs
+index 6148d42b4..c0e9bfdf2 100644
+--- a/src/gateway/meta_mcp/chain_receipt.rs
++++ b/src/gateway/meta_mcp/chain_receipt.rs
+@@ -200,8 +200,6 @@ impl super::super::MetaMcp {
+             }
+             Err(error) => {
+                 *slot.lock() = ChainReceipt::Refused;
+-                // MIN.1: refused unread, so its tenants are recorded as not read.
+-                crate::gateway::meta_mcp::invoke::audit::note_uninspected(self);
+                 Err(error)
+             }
+         }
