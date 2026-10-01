@@ -1,0 +1,3 @@
+head_sha	e34b23ece506cd1753f7179194f5b9c167e5345d
+# batch 3 for #2538 on the head above: N10 re-run against U9 (EOF drains a running task), per the lead's ruling; batch 2 (run 36810957985) saw N10 survive U6
+N10	linux	n10.patch	--lib -- owner2_stdio_tasks::eof_drains_a_running_task_before_returning

@@ -1,0 +1,13 @@
+diff --git a/src/gateway/server/mod.rs b/src/gateway/server/mod.rs
+index b3f301268..bb2675199 100644
+--- a/src/gateway/server/mod.rs
++++ b/src/gateway/server/mod.rs
+@@ -2755,7 +2755,7 @@ impl Gateway {
+         warm_start_tasks.cancel().await;
+         // Tasks before custody and backends: a worker's dispatch IS a backend call.
+         if let Some((tasks, expiry)) = task_store {
+-            stdio_tasks::shutdown(&tasks, expiry, self.config.server.shutdown_timeout).await;
++            drop((tasks, expiry));
+         }
+         // Release the custody store before the backends go. Reached on the EOF
+         // path only: a cancelled `run_stdio` releases it by dropping the Gateway.
