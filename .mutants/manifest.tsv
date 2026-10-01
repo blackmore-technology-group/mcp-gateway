@@ -1,0 +1,14 @@
+head_sha	32deb144e241f01c73e9f562bd8731f57db395c8
+# batch 1 for #2538 on the head above (MIK-7272.OWNER.2, I4 test plan)
+# R0 reverts src to the merge base, keeping the integration rows (the red proof). N6 has no patch: stdio's creation path holds no auth state to gate on; T11 is its behavioural check. N11 gives the task runtime its own admission index (shared admission).
+R0	linux	r0.patch	--test mik_7272_owner2_stdio_tasks
+N1	linux	n1.patch	--lib -- owner2_stdio_tasks
+N2	linux	n2.patch	--lib -- owner2_stdio_tasks::http_owner_text_cannot_name_the_local_operator
+N3	linux	n3.patch	--lib -- owner2_stdio_tasks::http_owner_text_cannot_name_the_local_operator
+N4	linux	n4.patch	--test mik_7272_owner2_stdio_tasks -- a_held_store_degrades_stdio_and_stops_advertising_tasks
+N5	linux	n5.patch	--test mik_7272_owner2_stdio_tasks -- the_task_survives_a_reopen
+N7	linux	n7.patch	--lib -- owner2_stdio_tasks::a_stdio_task_runs_under_the_current_tool_policy
+N8	linux	n8.patch	--test mik_7272_owner2_stdio_tasks -- http_and_stdio_share_a_config_without_contention
+N9	linux	n9.patch	--test mik_7272_owner2_stdio_tasks_owner -- stdio_creation_rules_match_http
+N10	linux	n10.patch	--lib -- owner2_stdio_tasks::stdio_eof_releases_the_store_lease_before_returning
+N11	linux	n11.patch	--test mik_7272_owner2_stdio_tasks_owner -- a_task_and_a_sync_call_share_one_admission

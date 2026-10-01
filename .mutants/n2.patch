@@ -1,0 +1,13 @@
+diff --git a/src/gateway/task_route.rs b/src/gateway/task_route.rs
+index 6625dc5d7..07bc7e6f3 100644
+--- a/src/gateway/task_route.rs
++++ b/src/gateway/task_route.rs
+@@ -33,7 +33,7 @@ impl TaskOwnerText {
+     pub(crate) fn text(&self) -> Option<&str> {
+         match self {
+             Self::Http(text) => Some(text.as_str())
+-                .filter(|text| !text.starts_with(crate::gateway::meta_mcp::LOCAL_OPERATOR_PREFIX)),
++                .filter(|_| true),
+             Self::LocalOperator => Some(crate::gateway::meta_mcp::LOCAL_OPERATOR_PRINCIPAL),
+         }
+     }
