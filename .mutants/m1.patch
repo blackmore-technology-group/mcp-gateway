@@ -1,0 +1,13 @@
+diff --git a/src/gateway/router/backend_handlers/direct_audit.rs b/src/gateway/router/backend_handlers/direct_audit.rs
+index 5c94ebc8c..2916e89ef 100644
+--- a/src/gateway/router/backend_handlers/direct_audit.rs
++++ b/src/gateway/router/backend_handlers/direct_audit.rs
+@@ -65,7 +65,7 @@ impl DirectCall {
+             // The firewall's own fallback (`handle_backend_call`): a call with
+             // no `arguments` member is scanned over `params`, so attribute it
+             // the same way (#2523).
+-            arguments: params.get("arguments").unwrap_or(params).clone(),
++            arguments: params.get("arguments").cloned().unwrap_or(Value::Null),
+             request_id: request
+                 .get("id")
+                 .and_then(|id| serde_json::from_value(id.clone()).ok()),

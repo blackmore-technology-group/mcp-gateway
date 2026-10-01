@@ -1,0 +1,3 @@
+head_sha	ac16963da4a105d67470673829aa0c7bfa61c7b6
+# batch 1 for #2527 on the head above (#2523 params fallback in direct_audit)
+M1	linux	m1.patch	--lib -- direct_refusal_without_arguments_names_the_tenants
