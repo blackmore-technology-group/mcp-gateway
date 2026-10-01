@@ -1,0 +1,12 @@
+diff --git a/src/gateway/server/stdio_dispatches.rs b/src/gateway/server/stdio_dispatches.rs
+index f2406484f..2a16c1763 100644
+--- a/src/gateway/server/stdio_dispatches.rs
++++ b/src/gateway/server/stdio_dispatches.rs
+@@ -89,7 +89,6 @@ impl StdioDispatches {
+                 .get(&request)
+                 .is_some_and(|(owner, _)| *owner == task)
+             {
+-                self.by_request.remove(&request);
+             }
+             self.cancelled.0.lock().remove(&request);
+         }

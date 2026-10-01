@@ -1,0 +1,13 @@
+diff --git a/src/gateway/server/mod.rs b/src/gateway/server/mod.rs
+index 2edfcf4cd..048f640ce 100644
+--- a/src/gateway/server/mod.rs
++++ b/src/gateway/server/mod.rs
+@@ -2749,7 +2749,7 @@ impl Gateway {
+         // and returns, which is what flushes the responses the drain produced.
+         drop(writer);
+         drop(channel);
+-        match tokio::time::timeout_at(deadline, &mut writer_task).await {
++        match Ok::<_, tokio::time::error::Elapsed>((&mut writer_task).await) {
+             Ok(Ok(())) => {}
+             Ok(Err(error)) => warn!(%error, "stdio: the stdout writer did not finish cleanly"),
+             Err(_) => {

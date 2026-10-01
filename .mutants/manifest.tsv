@@ -1,0 +1,7 @@
+head_sha	c584b812389674b9b5bb8eca24c96c18c7871e0a
+# batch 3 for #2519 on the head above (MIK-7272.LIFE.1, I3 test plan); batch 2 was cut on a head the review fixes replaced and never ran
+# R0 reverts mod.rs and stdio_dispatches.rs to the merge base, the tests kept (the red proof). P1 retyped after batch 1's compile VOID; P3 re-run against the strengthened L5; P4 re-run so every row names this head. P2 and P5 are not killable at this level.
+R0	linux	r0.patch	--lib -- life1_stdio_cancel
+P1	linux	p1.patch	--lib -- life1_stdio_cancel
+P3	linux	p3.patch	--lib -- life1_stdio_cancel::cancelling_a_finished_call_changes_nothing
+P4	linux	p4.patch	--lib -- life1_stdio_cancel::eof_is_bounded_when_the_client_stops_reading

@@ -1,0 +1,281 @@
+diff --git a/src/gateway/server/mod.rs b/src/gateway/server/mod.rs
+index 04613132f..c9ad951c6 100644
+--- a/src/gateway/server/mod.rs
++++ b/src/gateway/server/mod.rs
+@@ -28,7 +28,6 @@ mod replica_state_tests;
+ mod signing_allocation_tests;
+ mod stdio_catalogue;
+ mod stdio_channel;
+-mod stdio_dispatches;
+ mod stdio_nonce;
+ mod stdio_writer;
+ pub(crate) use stdio_nonce::StdioNonce;
+@@ -2438,13 +2437,12 @@ impl Gateway {
+         // unbounded queue would turn a stalled reader into operator-process
+         // memory growth.
+         let (writer, queue) = tokio::sync::mpsc::channel::<serde_json::Value>(STDOUT_QUEUE_DEPTH);
+-        let mut writer_task = tokio::spawn(Self::run_stdout_writer(output, queue));
++        let writer_task = tokio::spawn(Self::run_stdout_writer(output, queue));
+ 
+         // Use a fixed session ID for stdio sessions (single client, long-lived)
+         let session_id = STDIO_SESSION_ID;
+         let channel = Arc::new(stdio_channel::StdioClientChannel::new(writer.clone()));
+-        let mut dispatches = stdio_dispatches::StdioDispatches::default();
+-        let cancelled = dispatches.cancelled();
++        let mut dispatches: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+         // Admission, not just concurrency: a client that writes faster than the
+         // backends answer would otherwise pile one task per line onto the
+         // JoinSet. The permit is released when the dispatch task ends.
+@@ -2486,16 +2484,6 @@ impl Gateway {
+                     stdout_died = true;
+                     break;
+                 }
+-                // Reaped as each ends, so an aborted dispatch is joined at once
+-                // and a long session does not accumulate task records.
+-                Some(joined) = dispatches.join_next(), if !dispatches.is_empty() => {
+-                    if let Err(error) = joined
+-                        && !error.is_cancelled()
+-                    {
+-                        warn!(%error, "stdio: a dispatch task did not finish cleanly");
+-                    }
+-                    continue;
+-                }
+                 read = reader.next_line() => match read {
+                     Ok(Some(line)) => line,
+                     _ => break,
+@@ -2509,6 +2497,14 @@ impl Gateway {
+ 
+             debug!(line_len = line.len(), "stdio: received line");
+ 
++            // Reap what has finished, so a long session does not accumulate
++            // task records and a panicking dispatch is visible before EOF.
++            while let Some(joined) = dispatches.try_join_next() {
++                if let Err(error) = joined {
++                    warn!(%error, "stdio: a dispatch task did not finish cleanly");
++                }
++            }
++
+             let request: serde_json::Value = match serde_json::from_str(&line) {
+                 Ok(v) => v,
+                 Err(e) => {
+@@ -2536,21 +2532,6 @@ impl Gateway {
+                 continue;
+             }
+ 
+-            // Routed here, never dispatched (MIK-7272.LIFE.1). No frame answers
+-            // it; `initialize` runs inline and is never tracked, so it cannot
+-            // be cancelled.
+-            if request.get("method").and_then(serde_json::Value::as_str)
+-                == Some("notifications/cancelled")
+-            {
+-                if let Some(id) = request
+-                    .pointer("/params/requestId")
+-                    .and_then(|id| serde_json::from_value(id.clone()).ok())
+-                {
+-                    dispatches.cancel(&id);
+-                }
+-                continue;
+-            }
+-
+             // Handle batch requests (array of JSON-RPC calls)
+             if request.is_array() {
+                 // Boxed: the dispatch future is tens of kilobytes and this one
+@@ -2612,9 +2593,6 @@ impl Gateway {
+             } else {
+                 None
+             };
+-            let request_id: Option<crate::protocol::RequestId> = request
+-                .get("id")
+-                .and_then(|id| serde_json::from_value(id.clone()).ok());
+             let task = {
+                 let meta_mcp = Arc::clone(&meta_mcp);
+                 let tool_policy = Arc::clone(&tool_policy);
+@@ -2624,8 +2602,6 @@ impl Gateway {
+                 // `&dyn ClientChannel` and a spawned task needs `'static`.
+                 let channel = Arc::clone(&channel);
+                 let writer = writer.clone();
+-                let cancelled = cancelled.clone();
+-                let answers = request_id.clone();
+                 #[cfg(test)]
+                 let gate = initialize_gate.clone().filter(|_| !spawned);
+                 async move {
+@@ -2650,13 +2626,8 @@ impl Gateway {
+                     if let Some(gate) = gate {
+                         drop(gate.acquire().await);
+                     }
+-                    // Room first, then the cancel check and the enqueue under
+-                    // one lock: no frame for the id is queued after its cancel
+-                    // was processed, however long the queue was full.
+-                    if let Some(response) = response
+-                        && let Ok(permit) = writer.reserve().await
+-                    {
+-                        cancelled.send_unless_cancelled(answers.as_ref(), permit, response);
++                    if let Some(response) = response {
++                        send_frame(&writer, response).await;
+                     }
+                 }
+             };
+@@ -2676,7 +2647,7 @@ impl Gateway {
+                 // guaranteed position, and it keeps it by being inline.
+                 let admission = Arc::clone(&admission);
+                 let closed_probe = writer.clone();
+-                dispatches.spawn(request_id, async move {
++                dispatches.spawn(async move {
+                     // The wait that used to be here, moved off the reader. It
+                     // is unbounded, so stdout can die inside it: admission was
+                     // checked against a queue that may no longer exist, and
+@@ -2713,16 +2684,9 @@ impl Gateway {
+         // and `close` is terminal, so a question raised inside the drain window
+         // is refused rather than left waiting out the bridge's own timeout.
+         channel.close();
+-        // One deadline for the drain and the writer join (MIK-7272.LIFE.1):
+-        // a client that stops reading stdout blocks the writer, and the two
+-        // together still end within one `STDIO_DRAIN_TIMEOUT`, not two. The
+-        // teardown after the join is not bounded here.
+-        let deadline = tokio::time::Instant::now() + STDIO_DRAIN_TIMEOUT;
+-        if tokio::time::timeout_at(deadline, async {
++        if tokio::time::timeout(STDIO_DRAIN_TIMEOUT, async {
+             while let Some(joined) = dispatches.join_next().await {
+-                if let Err(e) = joined
+-                    && !e.is_cancelled()
+-                {
++                if let Err(e) = joined {
+                     warn!("stdio: dispatch task failed during drain: {e}");
+                 }
+             }
+@@ -2750,13 +2714,8 @@ impl Gateway {
+         // and returns, which is what flushes the responses the drain produced.
+         drop(writer);
+         drop(channel);
+-        match tokio::time::timeout_at(deadline, &mut writer_task).await {
+-            Ok(Ok(())) => {}
+-            Ok(Err(error)) => warn!(%error, "stdio: the stdout writer did not finish cleanly"),
+-            Err(_) => {
+-                writer_task.abort();
+-                warn!("stdio: stdout is not being read; unwritten frames are dropped");
+-            }
++        if let Err(error) = writer_task.await {
++            warn!(%error, "stdio: the stdout writer did not finish cleanly");
+         }
+         // Stop sweeping and probing before tearing the backends down. Both tasks
+         // hold an Arc on the registry and have no shutdown channel in this mode,
+diff --git a/src/gateway/server/stdio_dispatches.rs b/src/gateway/server/stdio_dispatches.rs
+deleted file mode 100644
+index a3bc5b1c7..000000000
+--- a/src/gateway/server/stdio_dispatches.rs
++++ /dev/null
+@@ -1,114 +0,0 @@
+-// SPDX-FileCopyrightText: 2026 Mikko Parkkola
+-// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+-//! The stdio serve loop's spawned dispatches, by the request id each answers,
+-//! so a `notifications/cancelled` can abort one (MIK-7272.LIFE.1, design D5 in
+-//! `docs/design/2026-09-30-sub4-stdio-owner.md`).
+-
+-use std::collections::hash_map::Entry;
+-use std::collections::{HashMap, HashSet};
+-use std::sync::Arc;
+-
+-use parking_lot::Mutex;
+-use serde_json::Value;
+-use tokio::sync::mpsc::Permit;
+-use tokio::task::{AbortHandle, Id, JoinError, JoinSet};
+-use tracing::warn;
+-
+-use crate::protocol::RequestId;
+-
+-/// Ids cancelled and not yet joined. Needed because `abort` does not stop a
+-/// task that is already being polled.
+-#[derive(Clone, Default)]
+-pub(super) struct Cancelled(Arc<Mutex<HashSet<RequestId>>>);
+-
+-impl Cancelled {
+-    /// Queue `frame` on `permit` unless `id` was cancelled. The check and the
+-    /// enqueue run under the lock `cancel` records under, so no frame for the
+-    /// id is queued after the cancel was processed.
+-    pub(super) fn send_unless_cancelled(
+-        &self,
+-        id: Option<&RequestId>,
+-        permit: Permit<'_, Value>,
+-        frame: Value,
+-    ) {
+-        let cancelled = self.0.lock();
+-        if !id.is_some_and(|id| cancelled.contains(id)) {
+-            permit.send(frame);
+-        }
+-    }
+-}
+-
+-#[derive(Default)]
+-pub(super) struct StdioDispatches {
+-    tasks: JoinSet<()>,
+-    by_request: HashMap<RequestId, (Id, AbortHandle)>,
+-    by_task: HashMap<Id, RequestId>,
+-    cancelled: Cancelled,
+-}
+-
+-impl StdioDispatches {
+-    pub(super) fn cancelled(&self) -> Cancelled {
+-        self.cancelled.clone()
+-    }
+-
+-    pub(super) fn is_empty(&self) -> bool {
+-        self.tasks.is_empty()
+-    }
+-
+-    /// Spawn the dispatch answering `id`. A client that reuses an id still in
+-    /// flight keeps its first mapping: the second dispatch runs, but cannot be
+-    /// cancelled by id. It is not refused, which could break a lenient client.
+-    pub(super) fn spawn(
+-        &mut self,
+-        id: Option<RequestId>,
+-        task: impl Future<Output = ()> + Send + 'static,
+-    ) {
+-        let handle = self.tasks.spawn(task);
+-        let Some(id) = id else { return };
+-        match self.by_request.entry(id) {
+-            Entry::Occupied(entry) => {
+-                warn!(id = %entry.key(), "stdio: request id reused while in flight; it cannot be cancelled");
+-            }
+-            Entry::Vacant(entry) => {
+-                self.by_task.insert(handle.id(), entry.key().clone());
+-                entry.insert((handle.id(), handle));
+-            }
+-        }
+-    }
+-
+-    /// Record `id` as cancelled, then abort its dispatch. An id that is not in
+-    /// flight is ignored (MCP cancellation: MAY ignore).
+-    pub(super) fn cancel(&mut self, id: &RequestId) {
+-        if let Some((_, handle)) = self.by_request.get(id) {
+-            self.cancelled.0.lock().insert(id.clone());
+-            handle.abort();
+-        }
+-    }
+-
+-    /// The next finished dispatch, with its entries released. Cancel-safe: the
+-    /// only await is `JoinSet::join_next_with_id`.
+-    pub(super) async fn join_next(&mut self) -> Option<Result<(), JoinError>> {
+-        let joined = self.tasks.join_next_with_id().await?;
+-        let task = match &joined {
+-            Ok((id, ())) => *id,
+-            Err(error) => error.id(),
+-        };
+-        if let Some(request) = self.by_task.remove(&task) {
+-            // Only the entry this task owns, so a stale completion never
+-            // unmaps a live dispatch.
+-            if self
+-                .by_request
+-                .get(&request)
+-                .is_some_and(|(owner, _)| *owner == task)
+-            {
+-                self.by_request.remove(&request);
+-            }
+-            self.cancelled.0.lock().remove(&request);
+-        }
+-        Some(joined.map(|_| ()))
+-    }
+-
+-    pub(super) async fn shutdown(&mut self) {
+-        self.tasks.shutdown().await;
+-    }
+-}
