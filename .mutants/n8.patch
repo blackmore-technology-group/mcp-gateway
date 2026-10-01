@@ -1,0 +1,13 @@
+diff --git a/src/gateway/server/stdio_tasks.rs b/src/gateway/server/stdio_tasks.rs
+index b3301a231..efb47019a 100644
+--- a/src/gateway/server/stdio_tasks.rs
++++ b/src/gateway/server/stdio_tasks.rs
+@@ -26,7 +26,7 @@ use crate::security::ToolPolicy;
+ /// The directory stdio's store lives in: `tasks.store_dir` resolved as HTTP
+ /// resolves it, then `stdio` (D6 rev 5 item 7).
+ pub(super) fn store_dir(config: &Config) -> PathBuf {
+-    super::expand_home_path(&config.tasks.store_dir).join("stdio")
++    super::expand_home_path(&config.tasks.store_dir)
+ }
+ 
+ /// An open stdio task runtime. Shared by every dispatch of the session.

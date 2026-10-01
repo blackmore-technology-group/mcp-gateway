@@ -1,0 +1,26 @@
+diff --git a/src/gateway/server/stdio_tasks.rs b/src/gateway/server/stdio_tasks.rs
+index b3301a231..4ed1e975a 100644
+--- a/src/gateway/server/stdio_tasks.rs
++++ b/src/gateway/server/stdio_tasks.rs
+@@ -198,7 +198,7 @@ impl StdioTasks {
+                 "task creation requires an idempotency key",
+             )));
+         };
+-        let owner = crate::gateway::meta_mcp::LOCAL_OPERATOR_PRINCIPAL;
++        let owner = "stdio";
+         Ok(Some(crate::gateway::task_service::TaskIntent {
+             executor: Arc::clone(&self.executor),
+             owned: self.owned(
+diff --git a/src/gateway/task_route.rs b/src/gateway/task_route.rs
+index 6625dc5d7..7d9abe370 100644
+--- a/src/gateway/task_route.rs
++++ b/src/gateway/task_route.rs
+@@ -34,7 +34,7 @@ impl TaskOwnerText {
+         match self {
+             Self::Http(text) => Some(text.as_str())
+                 .filter(|text| !text.starts_with(crate::gateway::meta_mcp::LOCAL_OPERATOR_PREFIX)),
+-            Self::LocalOperator => Some(crate::gateway::meta_mcp::LOCAL_OPERATOR_PRINCIPAL),
++            Self::LocalOperator => Some("stdio"),
+         }
+     }
+ }

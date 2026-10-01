@@ -1,0 +1,2433 @@
+diff --git a/src/config/features/tasks.rs b/src/config/features/tasks.rs
+index e836addb9..b3201f73b 100644
+--- a/src/config/features/tasks.rs
++++ b/src/config/features/tasks.rs
+@@ -22,11 +22,8 @@ const DEFAULT_LOGICAL_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+ 
+ /// Tasks extension store, worker pool, and later-increment knobs.
+ ///
+-/// `store_dir` is a durable path. An HTTP gateway that cannot open it does not
+-/// start; there is no volatile fallback. A stdio gateway uses its own
+-/// `<store_dir>/stdio` instead, so the two never contend for one lease; if that
+-/// store cannot be opened, stdio serves without tasks and does not advertise
+-/// them.
++/// `store_dir` is a durable path. A process that cannot open it does not start;
++/// there is no volatile fallback.
+ #[derive(Debug, Clone, Serialize, Deserialize)]
+ #[serde(default)]
+ pub struct TasksConfig {
+diff --git a/src/gateway/meta_mcp/mod.rs b/src/gateway/meta_mcp/mod.rs
+index bcf51485c..e49a4302a 100644
+--- a/src/gateway/meta_mcp/mod.rs
++++ b/src/gateway/meta_mcp/mod.rs
+@@ -131,11 +131,11 @@ const MAX_PROMOTED_PER_SESSION: usize = 10;
+ /// Reserved prefix for principals the gateway itself assigns. A NUL cannot
+ /// occur in an HTTP header value or in any principal the auth layer derives
+ /// (hex digests and fixed words), so no presented credential starts with it.
+-pub(crate) const LOCAL_OPERATOR_PREFIX: char = '\0';
++const LOCAL_OPERATOR_PREFIX: char = '\0';
+ 
+ /// The principal the stdio transport's own contexts key their retained
+ /// results under. See [`MetaMcpCallerContext::owner_principal`].
+-pub(crate) const LOCAL_OPERATOR_PRINCIPAL: &str = "\0local-operator.v1";
++const LOCAL_OPERATOR_PRINCIPAL: &str = "\0local-operator.v1";
+ 
+ /// Authenticated caller context for a `tools/call` dispatch.
+ ///
+diff --git a/src/gateway/meta_mcp/retry_input_tests.rs b/src/gateway/meta_mcp/retry_input_tests.rs
+index a2403290b..36b2df217 100644
+--- a/src/gateway/meta_mcp/retry_input_tests.rs
++++ b/src/gateway/meta_mcp/retry_input_tests.rs
+@@ -161,10 +161,9 @@ fn both_refusal_sites_share_the_rule() {
+             code_lines(include_str!("../../protocol/mrtr.rs")),
+             "input_responses_nonempty(self.input_responses.as_ref())",
+         ),
+-        // The `tasks/update` body both transports share (MIK-7272.OWNER.2).
+         (
+-            "task_route.rs",
+-            code_lines(include_str!("../task_route.rs")),
++            "router/handlers/tasks.rs",
++            code_lines(include_str!("../router/handlers/tasks.rs")),
+             "mrtr::input_responses_nonempty(",
+         ),
+     ];
+diff --git a/src/gateway/mod.rs b/src/gateway/mod.rs
+index 37e09447f..ece666105 100644
+--- a/src/gateway/mod.rs
++++ b/src/gateway/mod.rs
+@@ -62,7 +62,6 @@ pub mod session_lifecycle;
+ pub mod state;
+ pub mod streaming;
+ pub mod subscription_registry;
+-pub(crate) mod task_route;
+ pub(crate) mod task_service;
+ pub mod trace;
+ #[cfg(feature = "webui")]
+diff --git a/src/gateway/router/handlers.rs b/src/gateway/router/handlers.rs
+index d049c0e90..7ae849296 100644
+--- a/src/gateway/router/handlers.rs
++++ b/src/gateway/router/handlers.rs
+@@ -98,6 +98,21 @@ fn listened_task_ids(params: Option<&Value>) -> Vec<String> {
+         .unwrap_or_default()
+ }
+ 
++/// The `taskId` a task method names, if it names one.
++fn task_id_param(params: Option<&Value>) -> Option<&str> {
++    params?.get("taskId")?.as_str()
++}
++
++/// The one answer a caller gets for a task that is absent, or that belongs to
++/// another principal.
++///
++/// Deliberately carries no id: a message naming the task would let a caller
++/// tell "not yours" from "never existed", which is the whole disclosure the
++/// ownership rule exists to prevent.
++fn missing_task_error(id: crate::protocol::RequestId) -> JsonRpcResponse {
++    JsonRpcResponse::error(Some(id), -32602, "no such task")
++}
++
+ /// The owner key of a stateless task: the validated API-key credential. Only
+ /// `route_task_owner` reads it (the firewall keys on `identity::caller_key`);
+ /// tasks keep this encoding so an upgrade does not orphan stored ones. Empty
+@@ -1008,11 +1023,7 @@ async fn meta_mcp_dispatch(
+             "status" => "error"
+         )
+         .increment(1);
+-        return build_response(
+-            crate::gateway::task_route::missing_task_error(id),
+-            &session_id,
+-            StatusCode::OK,
+-        );
++        return build_response(missing_task_error(id), &session_id, StatusCode::OK);
+     }
+ 
+     // A `subscriptions/listen` naming tasks and nothing else HAS said what it
+diff --git a/src/gateway/router/handlers/tasks.rs b/src/gateway/router/handlers/tasks.rs
+index b7b9f729d..8e82ea247 100644
+--- a/src/gateway/router/handlers/tasks.rs
++++ b/src/gateway/router/handlers/tasks.rs
+@@ -1,24 +1,32 @@
+ // SPDX-FileCopyrightText: 2026 Mikko Parkkola
+ // SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+-//! Task eligibility, the task intent, and the HTTP glue of the three `tasks/*` arms.
++//! Task eligibility, wire envelopes, and the three `tasks/*` arms.
+ 
+ use std::sync::Arc;
+ 
+-use serde_json::Value;
++use serde_json::{Value, json};
+ 
+-use super::AppState;
++use super::{AppState, missing_task_error, task_id_param};
+ use crate::gateway::auth::AuthenticatedClient;
++use crate::gateway::meta_mcp::MetaMcp;
+ use crate::gateway::oauth::AgentIdentity as OAuthAgentIdentity;
+ use crate::gateway::router::OwnedRouterAuthorizer;
+-use crate::gateway::task_route::{TaskOwnerText, TaskRoute, is_task_dispatchable};
+-use crate::gateway::task_service::{OwnedCallerContext, TaskIntent};
++use crate::gateway::task_service::{InputOutcome, OwnedCallerContext, ServiceError, TaskIntent};
+ use crate::key_server::oidc::VerifiedIdentity;
+ use crate::mtls::CertIdentity;
+ use crate::protocol::meta::Declared;
+ use crate::protocol::mrtr::RetryFields;
+-use crate::protocol::tasks::TaskOptions;
++use crate::protocol::tasks::{Task, TaskOptions};
+ use crate::protocol::{JsonRpcResponse, RequestId};
+ 
++/// Tools that may be handed to the worker after the confirmation gate.
++fn is_task_dispatchable(meta_mcp: &MetaMcp, tool_name: &str) -> bool {
++    matches!(
++        tool_name,
++        "gateway_invoke" | "gateway_execute" | "gateway_run_playbook"
++    ) || meta_mcp.surfaced_tool_server(tool_name).is_some()
++}
++
+ /// Admission principal: verified identity when present, else the session key.
+ pub(super) fn task_principal(
+     verified_identity: Option<&VerifiedIdentity>,
+@@ -57,6 +65,23 @@ pub(super) fn route_task_owner(
+     }
+ }
+ 
++/// `Task::wire()` plus the envelope discriminator the arm supplies.
++pub(super) fn task_envelope(task: &Task, result_type: &str) -> Value {
++    let mut value = serde_json::to_value(task.wire()).unwrap_or(Value::Null);
++    if let Some(object) = value.as_object_mut() {
++        object.insert("resultType".into(), json!(result_type));
++    }
++    value
++}
++
++fn ack_complete() -> Value {
++    json!({ "resultType": "complete" })
++}
++
++fn store_unavailable(id: RequestId) -> JsonRpcResponse {
++    JsonRpcResponse::error(Some(id), -32603, "task store unavailable")
++}
++
+ /// Everything the task-intent decision reads about one `tools/call`.
+ ///
+ /// Deliberately has **no `Default`**: every field either selects the task path
+@@ -142,7 +167,7 @@ pub(super) fn task_intent_for_call(
+     Ok(Some(TaskIntent {
+         executor: Arc::clone(&state.task_executor),
+         owned: OwnedCallerContext::new(
+-            crate::gateway::task_service::host::TaskHost::Http(Arc::downgrade(state)),
++            Arc::downgrade(state),
+             OwnedRouterAuthorizer::capture(req.client, req.oauth_agent_identity, req.cert_identity),
+             req.api_key_name.map(str::to_owned),
+             req.agent_id.map(crate::security::OwnedProvenAgentId::from),
+@@ -252,32 +277,40 @@ pub(super) async fn tasks_get(
+     params: Option<&Value>,
+     caller: &RecoveryCaller<'_>,
+ ) -> JsonRpcResponse {
+-    let owner_text = TaskOwnerText::Http(owner.to_owned());
+-    route(state, &owner_text)
+-        .get(
+-            id.clone(),
+-            params,
+-            |task_id| recover_from_upstream(state, owner, task_id, params, caller),
+-            |current| {
+-                with_policy_caller(state, caller, |policy_caller| {
+-                    state.meta_mcp.refuse_stored_delivery(
+-                        &id,
+-                        current,
+-                        crate::gateway::meta_mcp::upstream::recovery_attestation(params),
+-                        caller.session_id,
+-                        policy_caller,
+-                    )
+-                })
+-            },
+-        )
+-        .await
+-}
+-
+-fn route<'a>(state: &'a Arc<AppState>, owner: &'a TaskOwnerText) -> TaskRoute<'a> {
+-    TaskRoute {
+-        service: &state.tasks,
+-        executor: &state.task_executor,
+-        owner,
++    let Some(task_id) = task_id_param(params) else {
++        return missing_task_error(id);
++    };
++    // The existing owner-scoped lookup FIRST. A foreign or missing identity gets
++    // the existing absence response and causes zero upstream calls, because
++    // there is nothing below this line for it to reach.
++    let committed = match state.tasks.get(owner, task_id) {
++        Ok(committed) => committed,
++        Err(ServiceError::NotFound) => return missing_task_error(id),
++        Err(_) => return store_unavailable(id),
++    };
++    if committed.task.status() == crate::protocol::tasks::TaskStatus::Working {
++        recover_from_upstream(state, owner, task_id, params, caller).await;
++    }
++    // ONE read after recovery: the snapshot that is authorized is the snapshot
++    // returned, so a task that turned terminal during recovery or through a
++    // concurrent worker is checked too.
++    match state.tasks.get(owner, task_id) {
++        Ok(current) => {
++            let refusal = with_policy_caller(state, caller, |policy_caller| {
++                state.meta_mcp.refuse_stored_delivery(
++                    &id,
++                    &current,
++                    crate::gateway::meta_mcp::upstream::recovery_attestation(params),
++                    caller.session_id,
++                    policy_caller,
++                )
++            });
++            refusal.unwrap_or_else(|| {
++                JsonRpcResponse::success(id, task_envelope(&current.task, "complete"))
++            })
++        }
++        Err(ServiceError::NotFound) => missing_task_error(id),
++        Err(_) => store_unavailable(id),
+     }
+ }
+ 
+@@ -370,12 +403,96 @@ pub(super) async fn tasks_update(
+     params: Option<&Value>,
+     caller: &RecoveryCaller<'_>,
+ ) -> JsonRpcResponse {
+-    let owner_text = TaskOwnerText::Http(owner.to_owned());
+-    route(state, &owner_text)
+-        .update(id, params, |owner| {
+-            update_caller(state, owner, params, caller)
+-        })
+-        .await
++    let Some(task_id) = task_id_param(params) else {
++        return missing_task_error(id);
++    };
++    let answers = params.and_then(|params| params.get("inputResponses"));
++    if !crate::protocol::mrtr::input_responses_nonempty(answers) {
++        return match state.tasks.update(owner, task_id, 0, json!({})).await {
++            Ok(_) => JsonRpcResponse::success(id, ack_complete()),
++            Err(ServiceError::NotFound) => missing_task_error(id),
++            Err(_) => store_unavailable(id),
++        };
++    }
++    let Some(Value::Object(answers)) = answers.cloned() else {
++        return JsonRpcResponse::error(Some(id), -32602, "inputResponses must be an object");
++    };
++    // Owner-scoped first: a foreign or absent task is answered as absent
++    // before anything about a round is said.
++    match state.tasks.get(owner, task_id) {
++        Ok(current)
++            if current.task.status() == crate::protocol::tasks::TaskStatus::InputRequired => {}
++        Ok(current) => return settled_or_no_round(id, &current.task),
++        Err(ServiceError::NotFound) => return missing_task_error(id),
++        Err(_) => return store_unavailable(id),
++    }
++    let outcome = state
++        .task_executor
++        .provide_input(
++            update_caller(state, owner, params, caller),
++            owner,
++            task_id,
++            answers,
++        )
++        .await;
++    match outcome {
++        InputOutcome::Accepted => JsonRpcResponse::success(id, ack_complete()),
++        // A cancel may have landed between the look-up above and the write.
++        InputOutcome::NotOutstanding => match state.tasks.get(owner, task_id) {
++            Ok(current) => settled_or_no_round(id, &current.task),
++            Err(ServiceError::NotFound) => missing_task_error(id),
++            Err(_) => store_unavailable(id),
++        },
++        InputOutcome::TooLarge => JsonRpcResponse::error(
++            Some(id),
++            -32602,
++            "inputResponses exceed the task record size limit",
++        ),
++        InputOutcome::Busy => JsonRpcResponse::error(Some(id), -32603, "task busy, retry"),
++        InputOutcome::PoolFull => {
++            JsonRpcResponse::error(Some(id), -32603, "task worker pool is full, retry")
++        }
++        InputOutcome::Closed(closed) => JsonRpcResponse::error(
++            Some(id),
++            -32602,
++            format!(
++                "inputResponses refused: {}; the round is closed",
++                closed.reason()
++            ),
++        ),
++        InputOutcome::NotFound => missing_task_error(id),
++        InputOutcome::Unavailable => store_unavailable(id),
++    }
++}
++
++/// A late answer to a settled task is told how it settled, with the reason it
++/// carries (#2429); a live task without a round gets the plain refusal.
++fn settled_or_no_round(id: RequestId, task: &Task) -> JsonRpcResponse {
++    let wire = serde_json::to_value(task.wire()).unwrap_or_default();
++    let status = wire
++        .get("status")
++        .and_then(Value::as_str)
++        .unwrap_or_default();
++    if !matches!(status, "completed" | "failed" | "cancelled") {
++        return no_round(id);
++    }
++    let reason = wire
++        .get("statusMessage")
++        .and_then(Value::as_str)
++        .map_or_else(String::new, |message| format!(": {message}"));
++    JsonRpcResponse::error(
++        Some(id),
++        -32602,
++        format!("inputResponses refused: the task is {status}{reason}"),
++    )
++}
++
++fn no_round(id: RequestId) -> JsonRpcResponse {
++    JsonRpcResponse::error(
++        Some(id),
++        -32602,
++        "inputResponses are not accepted until an input round is outstanding",
++    )
+ }
+ 
+ /// The resume's caller: THIS update request's live identity, the bundle
+@@ -387,7 +504,7 @@ fn update_caller(
+     caller: &RecoveryCaller<'_>,
+ ) -> OwnedCallerContext {
+     OwnedCallerContext::new(
+-        crate::gateway::task_service::host::TaskHost::Http(Arc::downgrade(state)),
++        Arc::downgrade(state),
+         OwnedRouterAuthorizer::capture(
+             caller.client,
+             caller.oauth_agent_identity,
+@@ -416,11 +533,26 @@ fn update_caller(
+ }
+ 
+ pub(super) async fn tasks_cancel(
+-    state: &Arc<AppState>,
++    state: &AppState,
+     owner: &str,
+     id: RequestId,
+     params: Option<&Value>,
+ ) -> JsonRpcResponse {
+-    let owner_text = TaskOwnerText::Http(owner.to_owned());
+-    route(state, &owner_text).cancel(id, params).await
++    let Some(task_id) = task_id_param(params) else {
++        return missing_task_error(id);
++    };
++    let committed = match state.tasks.get(owner, task_id) {
++        Ok(committed) => committed,
++        Err(ServiceError::NotFound) => return missing_task_error(id),
++        Err(_) => return store_unavailable(id),
++    };
++    match state
++        .task_executor
++        .cancel(owner, task_id, committed.revision)
++        .await
++    {
++        Ok(_) => JsonRpcResponse::success(id, ack_complete()),
++        Err(ServiceError::NotFound) => missing_task_error(id),
++        Err(_) => store_unavailable(id),
++    }
+ }
+diff --git a/src/gateway/router/tests/task_execution_adapter/drain.rs b/src/gateway/router/tests/task_execution_adapter/drain.rs
+index 740a80ec9..4b38be1c6 100644
+--- a/src/gateway/router/tests/task_execution_adapter/drain.rs
++++ b/src/gateway/router/tests/task_execution_adapter/drain.rs
+@@ -89,7 +89,7 @@ fn intent(state: &Arc<AppState>, key: &str, arguments: &Value) -> TaskIntent {
+     TaskIntent {
+         executor: Arc::clone(&state.task_executor),
+         owned: OwnedCallerContext::new(
+-            crate::gateway::task_service::host::TaskHost::Http(Arc::downgrade(state)),
++            Arc::downgrade(state),
+             OwnedRouterAuthorizer::capture(None, None, None),
+             None,
+             None,
+@@ -378,7 +378,7 @@ async fn an_idle_executor_drains_clean_and_still_runs_the_next_task() {
+ async fn a_task_worker_keeps_the_declared_agent_label() {
+     let (state, _store) = fixture_state(&auth_disabled()).await;
+     let owned = OwnedCallerContext::new(
+-        crate::gateway::task_service::host::TaskHost::Http(Arc::downgrade(&state)),
++        Arc::downgrade(&state),
+         OwnedRouterAuthorizer::capture(None, None, None),
+         None,
+         None,
+@@ -394,9 +394,8 @@ async fn a_task_worker_keeps_the_declared_agent_label() {
+         None,
+         None,
+     );
+-    let host = crate::gateway::task_service::host::LiveHost::Http(Arc::clone(&state));
+-    let authorizer = host.authorizer(owned.authorizer());
+-    let caller = owned.dispatch_context(&host, &authorizer);
++    let authorizer = owned.authorizer().borrow(&state);
++    let caller = owned.dispatch_context(&state, &authorizer);
+ 
+     let declared = caller
+         .agent_declared
+diff --git a/src/gateway/server/mod.rs b/src/gateway/server/mod.rs
+index b3f301268..4189ff484 100644
+--- a/src/gateway/server/mod.rs
++++ b/src/gateway/server/mod.rs
+@@ -30,9 +30,7 @@ mod stdio_catalogue;
+ mod stdio_channel;
+ mod stdio_dispatches;
+ mod stdio_nonce;
+-mod stdio_tasks;
+ mod stdio_writer;
+-mod task_runtime;
+ pub(crate) use stdio_nonce::StdioNonce;
+ mod support;
+ mod tools_changed;
+@@ -354,8 +352,6 @@ struct StdioClient<'a> {
+     session_id: &'a str,
+     channel: &'a dyn crate::gateway::input_bridge::ClientChannel,
+     handshake_capabilities: crate::protocol::meta::Declared,
+-    /// The session's task store; `None` serves no `tasks/*` (MIK-7272.OWNER.2).
+-    tasks: Option<&'a stdio_tasks::StdioTasks>,
+ }
+ 
+ /// Shared components produced by [`Gateway::build_meta_mcp`].
+@@ -1860,24 +1856,27 @@ impl Gateway {
+             .filter(|name| self.backends.get(name).is_some())
+             .cloned()
+             .collect();
+-        let (task_service, task_executor) = task_runtime::open(
+-            &self.config,
+-            &task_store_dir,
+-            Arc::clone(&subscriptions),
+-            &meta_mcp,
+-            &managed_adapters,
+-        )
+-        .await
+-        .map_err(|error| {
+-            // A held lease is most often a stdio gateway on the same
+-            // directory (MIK-7272.OWNER.2, design D6 rev 5 item 7).
+-            Error::Config(format!(
+-                "task store at '{}' could not be opened: {error} (if it is held by \
+-                 another gateway process, possibly a stdio gateway using '<store_dir>/stdio', \
+-                 give each gateway its own tasks.store_dir)",
+-                task_store_dir.display()
+-            ))
+-        })?;
++        let (task_service, task_executor) =
++            crate::gateway::task_service::open_runtime_with_recovery(
++                &task_store_dir,
++                self.config.tasks.max_workers,
++                crate::gateway::task_service::StoreLimits {
++                    records: self.config.tasks.max_records,
++                    per_principal: self.config.tasks.max_per_principal,
++                    record_bytes: self.config.tasks.max_record_bytes,
++                    logical_bytes: self.config.tasks.logical_budget_bytes,
++                },
++                Arc::clone(&subscriptions),
++                Arc::clone(meta_mcp.execution_admission()),
++                &managed_adapters,
++            )
++            .await
++            .map_err(|error| {
++                Error::Config(format!(
++                    "task store at '{}' could not be opened: {error}",
++                    task_store_dir.display()
++                ))
++            })?;
+         info!(
+             path = %task_store_dir.display(),
+             max_workers = self.config.tasks.max_workers,
+@@ -2192,13 +2191,35 @@ impl Gateway {
+         // own transaction and no new one starts against a store about to give
+         // its lease back. The join returns what the sweep actually met, so a
+         // store it could not delete from is not reported as a clean stop.
+-        task_runtime::shutdown(
+-            expiry_sweep,
+-            &task_executor_for_shutdown,
+-            &task_service_for_shutdown,
+-            drain_timeout,
+-        )
+-        .await;
++        if let Err(error) = expiry_sweep.shutdown().await {
++            warn!(%error, "Task expiry sweep did not stop cleanly");
++        } else {
++            info!("Task expiry sweep stopped");
++        }
++
++        // Task workers hold no inflight permit — the request that created one
++        // was answered with a handle and released its permit long before the
++        // work finished — so the drain above cannot see them and a second wait
++        // is what makes shutdown graceful for them too.
++        //
++        // Ahead of `stop_all`, because a worker's dispatch IS a backend call:
++        // stopping the pool first would fail the very work this wait exists to
++        // let finish. The store closes afterwards, which joins any writer still
++        // in flight and gives the directory lease back — a lease this process
++        // kept would refuse the next start its own store.
++        info!(timeout = ?drain_timeout, "Draining in-flight tasks...");
++        let task_drain = task_executor_for_shutdown.drain(drain_timeout).await;
++        if task_drain.timed_out {
++            warn!(
++                acquired_workers = task_drain.acquired,
++                "Task drain timeout reached, proceeding with shutdown"
++            );
++        } else {
++            info!("All in-flight tasks completed");
++        }
++        if let Err(error) = task_service_for_shutdown.shutdown().await {
++            warn!(%error, "Task store did not release its lease cleanly");
++        }
+ 
+         // Release the custody store before the backends go: the drain above is
+         // what guarantees no in-flight request is still holding a credential.
+@@ -2305,9 +2326,6 @@ impl Gateway {
+                 }
+             },
+         ));
+-        // MIK-7272.OWNER.2: `<tasks.store_dir>/stdio`, or `None` to serve as before.
+-        let task_store =
+-            stdio_tasks::open(&self.config, self.env.startup(), &meta_mcp, &tool_policy).await;
+ 
+         // Account strategies must exist before stdio can admit a request, just
+         // as they do before the HTTP listener starts serving.
+@@ -2603,7 +2621,6 @@ impl Gateway {
+                 // Cloned, not borrowed: the caller context holds
+                 // `&dyn ClientChannel` and a spawned task needs `'static`.
+                 let channel = Arc::clone(&channel);
+-                let tasks = task_store.as_ref().map(|(tasks, _)| Arc::clone(tasks));
+                 let writer = writer.clone();
+                 let cancelled = cancelled.clone();
+                 let answers = request_id.clone();
+@@ -2620,7 +2637,6 @@ impl Gateway {
+                                 session_id,
+                                 channel: &*channel,
+                                 handshake_capabilities,
+-                                tasks: tasks.as_deref(),
+                             },
+                             &telemetry,
+                         )),
+@@ -2753,10 +2769,6 @@ impl Gateway {
+         // starts for a gateway that is on its way out. The guard remains the
+         // backstop for every path that does not reach this line.
+         warm_start_tasks.cancel().await;
+-        // Tasks before custody and backends: a worker's dispatch IS a backend call.
+-        if let Some((tasks, expiry)) = task_store {
+-            stdio_tasks::shutdown(&tasks, expiry, self.config.server.shutdown_timeout).await;
+-        }
+         // Release the custody store before the backends go. Reached on the EOF
+         // path only: a cancelled `run_stdio` releases it by dropping the Gateway.
+         // Not covered by gateway_bootstrap_tests — no test drives `run_stdio`.
+@@ -2854,7 +2866,6 @@ impl Gateway {
+                 session_id,
+                 channel: &crate::gateway::input_bridge::NoClientChannel,
+                 handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-                tasks: None,
+             },
+             &StdioTelemetry::default(),
+         )
+@@ -2980,35 +2991,17 @@ impl Gateway {
+                     // this dispatcher has no running config, and the stateless
+                     // revision is specified over streamable HTTP (a limitation, not
+                     // a decision that stdio is excluded).
+-                    "server/discover" => stdio_tasks::advertised(
+-                        client.tasks,
+-                        JsonRpcResponse::success_serialized(id, meta_mcp.discover_document(false)),
+-                    ),
+-                    "initialize" => stdio_tasks::advertised(
+-                        client.tasks,
+-                        meta_mcp.handle_initialize(
+-                            id,
+-                            params,
+-                            Some(session_id),
+-                            None,
+-                            request_shape.era(),
+-                            scope,
+-                        ),
+-                    ),
+-                    m @ ("tasks/get" | "tasks/update" | "tasks/cancel") => {
+-                        let retry = crate::protocol::mrtr::RetryFields::from_params(params);
+-                        let caller = Self::build_stdio_caller_context(
+-                            true,
+-                            None,
+-                            &policy,
+-                            &retry,
+-                            &request_shape,
+-                            client,
+-                        );
+-                        let shape = &request_shape;
+-                        stdio_tasks::serve(client.tasks, m, id, params, shape, &caller, session_id)
+-                            .await
++                    "server/discover" => {
++                        JsonRpcResponse::success_serialized(id, meta_mcp.discover_document(false))
+                     }
++                    "initialize" => meta_mcp.handle_initialize(
++                        id,
++                        params,
++                        Some(session_id),
++                        None,
++                        request_shape.era(),
++                        scope,
++                    ),
+                     "tools/list" => {
+                         meta_mcp.handle_tools_list_with_params(id, params, Some(session_id), scope)
+                     }
+@@ -3276,8 +3269,6 @@ impl Gateway {
+             };
+ 
+             let retry = crate::protocol::mrtr::RetryFields::from_params(params);
+-            // Read before the merge below moves `_meta` out of the request.
+-            let wants_task = params.is_some_and(|params| params.get("task").is_some());
+             let is_modern = matches!(
+                 request_shape,
+                 crate::protocol::meta::RequestShape::Modern(_)
+@@ -3354,32 +3345,13 @@ impl Gateway {
+                 );
+             }
+             caller.signing = signing_context.as_ref();
+-            if wants_task && let Some(tasks) = client.tasks {
+-                match stdio_tasks::task_intent(
+-                    tasks,
+-                    &id,
+-                    &tool_name,
+-                    &arguments,
+-                    &caller,
+-                    request_shape,
+-                    session_id,
+-                ) {
+-                    Ok(intent) => caller.task = intent,
+-                    Err(refusal) => break 'tool_call *refusal,
+-                }
+-            }
+-            // A task is admitted durably by its handoff, as on HTTP.
+-            let admission = if caller.task.is_some() {
+-                Ok(super::meta_mcp::admission::SyncAdmission::Unprotected)
+-            } else {
+-                meta_mcp.admit_meta_sync(
+-                    &caller,
+-                    &tool_name,
+-                    arguments.as_ref(),
+-                    Some(session_id),
+-                    &id,
+-                )
+-            };
++            let admission = meta_mcp.admit_meta_sync(
++                &caller,
++                &tool_name,
++                arguments.as_ref(),
++                Some(session_id),
++                &id,
++            );
+             execution = match admission {
+                 Ok(super::meta_mcp::admission::SyncAdmission::Unprotected) => None,
+                 Ok(super::meta_mcp::admission::SyncAdmission::Owned(lease)) => Some(lease),
+@@ -3472,8 +3444,6 @@ impl Gateway {
+                     // handshake would widen a channel that cannot ask.
+                     channel: &crate::gateway::input_bridge::NoClientChannel,
+                     handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-                    // A batch is a legacy shape; it serves no `tasks/*`.
+-                    tasks: None,
+                 },
+                 protocol_telemetry_sink,
+             ))
+@@ -4197,7 +4167,6 @@ mod tests {
+                 session_id: "stdio-durable-window-test",
+                 channel: &crate::gateway::input_bridge::NoClientChannel,
+                 handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-                tasks: None,
+             },
+             &sink,
+         )
+diff --git a/src/gateway/server/stdio_tasks.rs b/src/gateway/server/stdio_tasks.rs
+deleted file mode 100644
+index b3301a231..000000000
+--- a/src/gateway/server/stdio_tasks.rs
++++ /dev/null
+@@ -1,384 +0,0 @@
+-// SPDX-FileCopyrightText: 2026 Mikko Parkkola
+-// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+-//! The stdio local operator's durable task store (MIK-7272.OWNER.2, design D6
+-//! rev 5 items 5–7, `docs/design/2026-09-30-sub4-stdio-owner.md`).
+-//!
+-//! Stdio opens `<tasks.store_dir>/stdio`, its own directory beside HTTP's, so
+-//! the two never contend for one lease by default. When that store cannot be
+-//! opened, stdio serves exactly as before: no `tasks/*`, task-augmented calls
+-//! answered synchronously, and no Tasks in its handshake or discover answer.
+-
+-use std::path::{Path, PathBuf};
+-use std::sync::Arc;
+-use std::time::Duration;
+-
+-use serde_json::Value;
+-use tracing::{info, warn};
+-
+-use crate::config::Config;
+-use crate::gateway::meta_mcp::MetaMcp;
+-use crate::gateway::task_service::execution::ExpirySweep;
+-use crate::gateway::task_service::host::StdioTaskHost;
+-use crate::gateway::task_service::{TaskExecutor, TaskService};
+-use crate::protocol::tasks::TaskOptions;
+-use crate::security::ToolPolicy;
+-
+-/// The directory stdio's store lives in: `tasks.store_dir` resolved as HTTP
+-/// resolves it, then `stdio` (D6 rev 5 item 7).
+-pub(super) fn store_dir(config: &Config) -> PathBuf {
+-    super::expand_home_path(&config.tasks.store_dir).join("stdio")
+-}
+-
+-/// An open stdio task runtime. Shared by every dispatch of the session.
+-pub(super) struct StdioTasks {
+-    pub(super) service: Arc<TaskService>,
+-    pub(super) executor: Arc<TaskExecutor>,
+-    pub(super) host: Arc<StdioTaskHost>,
+-    pub(super) options: TaskOptions,
+-}
+-
+-/// Open stdio's store, or `None` when it cannot be opened (logged with the
+-/// path and the cause). The expiry sweep is returned separately: it is joined
+-/// at EOF, before the store closes.
+-pub(super) async fn open(
+-    config: &Config,
+-    overlay: &crate::config::EnvOverlay,
+-    meta_mcp: &Arc<MetaMcp>,
+-    tool_policy: &Arc<ToolPolicy>,
+-) -> Option<(Arc<StdioTasks>, ExpirySweep)> {
+-    let dir = store_dir(config);
+-    let subscriptions = match subscriptions(config, overlay) {
+-        Ok(subscriptions) => subscriptions,
+-        Err(error) => {
+-            degraded(&dir, &error.to_string());
+-            return None;
+-        }
+-    };
+-    // No upstream adapter on stdio: every interrupted row it holds is settled
+-    // on open, and none is kept for an upstream read (D6 rev 5 item 4).
+-    let opened = super::task_runtime::open(config, &dir, subscriptions, meta_mcp, &[]).await;
+-    let (service, executor) = match opened {
+-        Ok(opened) => opened,
+-        Err(error) => {
+-            degraded(&dir, &error.to_string());
+-            return None;
+-        }
+-    };
+-    let expiry = match executor.start_expiry(config.tasks.expiry_interval) {
+-        Ok(expiry) => expiry,
+-        Err(error) => {
+-            let _ = service.shutdown().await;
+-            degraded(&dir, &error.to_string());
+-            return None;
+-        }
+-    };
+-    info!(path = %dir.display(), "stdio: durable task store opened");
+-    let tasks = StdioTasks {
+-        service,
+-        executor,
+-        host: Arc::new(StdioTaskHost {
+-            meta_mcp: Arc::clone(meta_mcp),
+-            tool_policy: Arc::clone(tool_policy),
+-            nonce: super::StdioNonce::process(),
+-        }),
+-        options: TaskOptions {
+-            ttl_ms: (config.tasks.default_ttl_ms > 0).then_some(config.tasks.default_ttl_ms),
+-            poll_interval_ms: (config.tasks.poll_interval_ms > 0)
+-                .then_some(config.tasks.poll_interval_ms),
+-        },
+-    };
+-    Some((Arc::new(tasks), expiry))
+-}
+-
+-/// The executor publishes task notifications to a registry. Stdio has no
+-/// listener route, so nothing subscribes; it is built as `Gateway::run` builds
+-/// it, from the same auth configuration.
+-fn subscriptions(
+-    config: &Config,
+-    overlay: &crate::config::EnvOverlay,
+-) -> crate::Result<Arc<crate::gateway::subscription_registry::SubscriptionRegistry>> {
+-    use crate::gateway::auth::{AuthState, DashboardBootstrap, ResolvedAuthConfig};
+-    let auth_config = Arc::new(ResolvedAuthConfig::try_from_config(&config.auth, overlay)?);
+-    Ok(Arc::new(
+-        crate::gateway::subscription_registry::SubscriptionRegistry::new(
+-            crate::gateway::subscription_registry::DEFAULT_MAX_LISTENERS,
+-            AuthState {
+-                auth_config,
+-                key_server: None,
+-                dashboard_bootstrap: Arc::new(DashboardBootstrap::new()),
+-                tls_enabled: false,
+-                live_config: Arc::new(crate::config_reload::LiveConfig::new(config.clone())),
+-            },
+-        ),
+-    ))
+-}
+-
+-fn degraded(dir: &Path, cause: &str) {
+-    warn!(
+-        path = %dir.display(),
+-        cause,
+-        "stdio: task store unavailable; serving without tasks, and Tasks is not advertised"
+-    );
+-}
+-
+-/// HTTP's own task shutdown, through the shared helper: join the expiry
+-/// sweep, drain the executor, close the store and release its lease.
+-pub(super) async fn shutdown(tasks: &StdioTasks, expiry: ExpirySweep, timeout: Duration) {
+-    super::task_runtime::shutdown(expiry, &tasks.executor, &tasks.service, timeout).await;
+-}
+-
+-/// Remove the Tasks extension from an `initialize` or `server/discover`
+-/// answer, for a session that serves no `tasks/*`.
+-pub(super) fn strip_tasks_extension(value: &mut Value) {
+-    match value {
+-        Value::Object(map) => {
+-            map.remove(crate::protocol::extensions::Extension::Tasks.id());
+-            map.values_mut().for_each(strip_tasks_extension);
+-        }
+-        Value::Array(items) => items.iter_mut().for_each(strip_tasks_extension),
+-        _ => {}
+-    }
+-}
+-
+-/// HTTP's refusal for a request that reaches the Tasks extension without
+-/// declaring it on that request (`router/handlers.rs`), with the same code,
+-/// text and data, so the two transports answer alike.
+-pub(super) fn undeclared(
+-    id: crate::protocol::RequestId,
+-    method: &str,
+-    shape: &crate::protocol::meta::RequestShape,
+-) -> Option<crate::protocol::JsonRpcResponse> {
+-    use crate::protocol::extensions::Extension;
+-    if shape.declared_extensions().contains(Extension::Tasks) {
+-        return None;
+-    }
+-    let tasks = Extension::Tasks.id();
+-    Some(crate::protocol::JsonRpcResponse::error_with_data(
+-        Some(id),
+-        crate::protocol::era::MISSING_REQUIRED_CLIENT_CAPABILITY,
+-        format!("'{method}' requires the '{tasks}' extension to be declared"),
+-        serde_json::json!({ "requiredCapabilities": { "extensions": { tasks: {} } } }),
+-    ))
+-}
+-
+-/// What one stdio `tools/call` asks of the task surface.
+-pub(super) struct IntentRequest<'a> {
+-    pub(super) id: crate::protocol::RequestId,
+-    pub(super) tool_name: &'a str,
+-    pub(super) arguments: &'a Value,
+-    pub(super) is_modern: bool,
+-    pub(super) retry: &'a crate::protocol::mrtr::RetryFields,
+-    pub(super) input_capabilities: crate::protocol::meta::Declared,
+-    pub(super) session_id: &'a str,
+-    pub(super) protocol_revision: Option<&'a str>,
+-}
+-
+-impl StdioTasks {
+-    /// The task intent for a call carrying a `task` member: HTTP's rules
+-    /// (`task_intent_for_call`) without HTTP's auth gate, owned by the local
+-    /// operator (D6 rev 5 item 5). `Ok(None)` is the ordinary synchronous path.
+-    pub(super) fn intent(
+-        &self,
+-        req: &IntentRequest<'_>,
+-    ) -> Result<
+-        Option<crate::gateway::task_service::TaskIntent>,
+-        Box<crate::protocol::JsonRpcResponse>,
+-    > {
+-        if !req.is_modern
+-            || req.retry.request_state.is_some()
+-            || req.retry.input_responses.is_some()
+-            || !crate::gateway::task_route::is_task_dispatchable(&self.host.meta_mcp, req.tool_name)
+-        {
+-            return Ok(None);
+-        }
+-        let Some(key) = req.retry.idempotency_key.as_deref() else {
+-            return Err(Box::new(crate::protocol::JsonRpcResponse::error(
+-                Some(req.id.clone()),
+-                -32602,
+-                "task creation requires an idempotency key",
+-            )));
+-        };
+-        let owner = crate::gateway::meta_mcp::LOCAL_OPERATOR_PRINCIPAL;
+-        Ok(Some(crate::gateway::task_service::TaskIntent {
+-            executor: Arc::clone(&self.executor),
+-            owned: self.owned(
+-                req.input_capabilities,
+-                req.session_id,
+-                req.protocol_revision,
+-                req.retry.attestation.clone(),
+-            ),
+-            request: crate::gateway::meta_mcp::task_admission_request(
+-                owner.to_owned(),
+-                key.to_owned(),
+-                req.tool_name,
+-                req.arguments,
+-            ),
+-            options: self.options,
+-        }))
+-    }
+-
+-    /// The worker's caller for a stdio task: the stdio session's own context,
+-    /// hosted by this store so the transport mark survives the rebuild.
+-    fn owned(
+-        &self,
+-        input_capabilities: crate::protocol::meta::Declared,
+-        session_id: &str,
+-        protocol_revision: Option<&str>,
+-        attestation: Option<String>,
+-    ) -> crate::gateway::task_service::OwnedCallerContext {
+-        crate::gateway::task_service::OwnedCallerContext::new(
+-            crate::gateway::task_service::host::TaskHost::Stdio(Arc::downgrade(&self.host)),
+-            crate::gateway::router::OwnedRouterAuthorizer::capture(None, None, None),
+-            None,
+-            None,
+-            None,
+-            None,
+-            None,
+-            super::STDIO_CREDENTIAL_PRINCIPAL.to_owned(),
+-            crate::gateway::meta_mcp::Authentication::Authenticated,
+-            crate::security::audit::CredentialKind::LocalTransport,
+-            // As every stdio call: the client spawned this process.
+-            true,
+-            input_capabilities,
+-            Some(session_id.to_owned()),
+-            protocol_revision.map(str::to_owned),
+-            attestation,
+-        )
+-    }
+-
+-    /// `tasks/get`, `tasks/update` and `tasks/cancel` for the local operator.
+-    /// The delivery check runs under the stdio authorizer; no upstream read
+-    /// exists on stdio (D6 rev 5 item 4).
+-    pub(super) async fn dispatch(
+-        &self,
+-        method: &str,
+-        id: crate::protocol::RequestId,
+-        params: Option<&Value>,
+-        caller: &crate::gateway::meta_mcp::MetaMcpCallerContext<'_>,
+-        session_id: &str,
+-    ) -> crate::protocol::JsonRpcResponse {
+-        use crate::gateway::task_route::{TaskOwnerText, TaskRoute};
+-        let owner = TaskOwnerText::LocalOperator;
+-        let route = TaskRoute {
+-            service: &self.service,
+-            executor: &self.executor,
+-            owner: &owner,
+-        };
+-        match method {
+-            "tasks/get" => {
+-                route
+-                    .get(
+-                        id.clone(),
+-                        params,
+-                        |_| std::future::ready(()),
+-                        |current| {
+-                            self.host.meta_mcp.refuse_stored_delivery(
+-                                &id,
+-                                current,
+-                                crate::gateway::meta_mcp::upstream::recovery_attestation(params),
+-                                Some(session_id),
+-                                caller,
+-                            )
+-                        },
+-                    )
+-                    .await
+-            }
+-            "tasks/update" => {
+-                // THIS update request's caller resumes the round; a resumed
+-                // result is never response-cached, so no revision is carried.
+-                let attestation = caller.retry.attestation.clone();
+-                route
+-                    .update(id, params, |_| {
+-                        self.owned(caller.input_capabilities, session_id, None, attestation)
+-                    })
+-                    .await
+-            }
+-            "tasks/cancel" => route.cancel(id, params).await,
+-            // Fail closed: a method this body does not name is never handled
+-            // as one of the three it does.
+-            other => crate::protocol::JsonRpcResponse::error(
+-                Some(id),
+-                -32601,
+-                format!("Method not found: {other}"),
+-            ),
+-        }
+-    }
+-}
+-
+-/// The answer to `initialize` or `server/discover`, without Tasks when this
+-/// session serves no `tasks/*` (D6 rev 5 item 6): the advertisement matches the
+-/// surface in both outcomes.
+-pub(super) fn advertised(
+-    tasks: Option<&StdioTasks>,
+-    mut response: crate::protocol::JsonRpcResponse,
+-) -> crate::protocol::JsonRpcResponse {
+-    if tasks.is_none()
+-        && let Some(result) = response.result.as_mut()
+-    {
+-        strip_tasks_extension(result);
+-    }
+-    response
+-}
+-
+-/// A `tasks/*` method on stdio, refused as HTTP refuses it when the request is
+-/// not modern or does not declare the extension.
+-pub(super) async fn serve(
+-    tasks: Option<&StdioTasks>,
+-    method: &str,
+-    id: crate::protocol::RequestId,
+-    params: Option<&Value>,
+-    shape: &crate::protocol::meta::RequestShape,
+-    caller: &crate::gateway::meta_mcp::MetaMcpCallerContext<'_>,
+-    session_id: &str,
+-) -> crate::protocol::JsonRpcResponse {
+-    let Some(tasks) = tasks else {
+-        return crate::protocol::JsonRpcResponse::error(
+-            Some(id),
+-            -32601,
+-            format!("Method not found: {method}"),
+-        );
+-    };
+-    if !matches!(shape, crate::protocol::meta::RequestShape::Modern(_)) {
+-        return crate::protocol::JsonRpcResponse::error(
+-            Some(id),
+-            -32601,
+-            format!("method '{method}' requires MCP 2026-07-28"),
+-        );
+-    }
+-    if let Some(refusal) = undeclared(id.clone(), method, shape) {
+-        return refusal;
+-    }
+-    tasks.dispatch(method, id, params, caller, session_id).await
+-}
+-
+-/// The intent for a stdio `tools/call` carrying a `task` member, or HTTP's
+-/// refusal for a request that did not declare the extension.
+-pub(super) fn task_intent(
+-    tasks: &StdioTasks,
+-    id: &crate::protocol::RequestId,
+-    tool_name: &str,
+-    arguments: &Value,
+-    caller: &crate::gateway::meta_mcp::MetaMcpCallerContext<'_>,
+-    shape: &crate::protocol::meta::RequestShape,
+-    session_id: &str,
+-) -> Result<Option<crate::gateway::task_service::TaskIntent>, Box<crate::protocol::JsonRpcResponse>>
+-{
+-    // A legacy shape cannot declare an extension, and a legacy `task` member
+-    // was always answered synchronously on stdio: it stays so, unrefused.
+-    if !caller.is_modern {
+-        return Ok(None);
+-    }
+-    if let Some(refusal) = undeclared(id.clone(), "tools/call", shape) {
+-        return Err(Box::new(refusal));
+-    }
+-    tasks.intent(&IntentRequest {
+-        id: id.clone(),
+-        tool_name,
+-        arguments,
+-        is_modern: caller.is_modern,
+-        retry: caller.retry,
+-        input_capabilities: caller.input_capabilities,
+-        session_id,
+-        protocol_revision: caller.protocol_revision,
+-    })
+-}
+diff --git a/src/gateway/server/task_runtime.rs b/src/gateway/server/task_runtime.rs
+deleted file mode 100644
+index 07e7a9880..000000000
+--- a/src/gateway/server/task_runtime.rs
++++ /dev/null
+@@ -1,78 +0,0 @@
+-// SPDX-FileCopyrightText: 2026 Mikko Parkkola
+-// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+-//! Opening and shutting down a durable task runtime, shared by `Gateway::run`
+-//! and the stdio loop so the two transports cannot drift (MIK-7272.OWNER.2,
+-//! design D6 rev 5 item 6).
+-
+-use std::path::Path;
+-use std::sync::Arc;
+-use std::time::Duration;
+-
+-use tracing::{info, warn};
+-
+-use crate::config::Config;
+-use crate::gateway::meta_mcp::MetaMcp;
+-use crate::gateway::subscription_registry::SubscriptionRegistry;
+-use crate::gateway::task_service::execution::ExpirySweep;
+-use crate::gateway::task_service::{ServiceError, StoreLimits, TaskExecutor, TaskService};
+-
+-/// Open the store at `dir` with recovery, sharing meta-MCP's admission
+-/// authority: a task and a later synchronous call carrying the same owner and
+-/// key meet at ONE admission index. `managed` names the upstream adapters
+-/// whose interrupted rows are kept for an owner read; every other row is
+-/// settled on open.
+-pub(super) async fn open(
+-    config: &Config,
+-    dir: &Path,
+-    subscriptions: Arc<SubscriptionRegistry>,
+-    meta_mcp: &MetaMcp,
+-    managed: &[String],
+-) -> Result<(Arc<TaskService>, Arc<TaskExecutor>), ServiceError> {
+-    crate::gateway::task_service::open_runtime_with_recovery(
+-        dir,
+-        config.tasks.max_workers,
+-        StoreLimits {
+-            records: config.tasks.max_records,
+-            per_principal: config.tasks.max_per_principal,
+-            record_bytes: config.tasks.max_record_bytes,
+-            logical_bytes: config.tasks.logical_budget_bytes,
+-        },
+-        subscriptions,
+-        Arc::clone(meta_mcp.execution_admission()),
+-        managed,
+-    )
+-    .await
+-}
+-
+-/// The task half of shutdown, in this order:
+-/// - the expiry sweep is joined while the store is still open, so a deletion
+-///   already in flight finishes and no new one starts;
+-/// - workers drain within `timeout` (a worker's dispatch IS a backend call,
+-///   so this precedes any backend teardown);
+-/// - the store closes, joining any writer still in flight and giving the
+-///   directory lease back.
+-pub(super) async fn shutdown(
+-    expiry: ExpirySweep,
+-    executor: &TaskExecutor,
+-    service: &TaskService,
+-    timeout: Duration,
+-) {
+-    if let Err(error) = expiry.shutdown().await {
+-        warn!(%error, "Task expiry sweep did not stop cleanly");
+-    } else {
+-        info!("Task expiry sweep stopped");
+-    }
+-    info!(timeout = ?timeout, "Draining in-flight tasks...");
+-    let drained = executor.drain(timeout).await;
+-    if drained.timed_out {
+-        warn!(
+-            acquired_workers = drained.acquired,
+-            "Task drain timeout reached, proceeding with shutdown"
+-        );
+-    } else {
+-        info!("All in-flight tasks completed");
+-    }
+-    if let Err(error) = service.shutdown().await {
+-        warn!(%error, "Task store did not release its lease cleanly");
+-    }
+-}
+diff --git a/src/gateway/server/tests/dispatcher_admission_arms.rs b/src/gateway/server/tests/dispatcher_admission_arms.rs
+index 1c225e91d..61fe2b048 100644
+--- a/src/gateway/server/tests/dispatcher_admission_arms.rs
++++ b/src/gateway/server/tests/dispatcher_admission_arms.rs
+@@ -34,7 +34,6 @@ async fn dispatch(fixture: &Fixture, request: Value) -> Value {
+             session_id: SESSION,
+             channel: &crate::gateway::input_bridge::NoClientChannel,
+             handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-            tasks: None,
+         },
+         &super::super::StdioTelemetry::default(),
+     )
+diff --git a/src/gateway/server/tests/grant_decision_stdio.rs b/src/gateway/server/tests/grant_decision_stdio.rs
+index 5f2b16063..82f3c62b6 100644
+--- a/src/gateway/server/tests/grant_decision_stdio.rs
++++ b/src/gateway/server/tests/grant_decision_stdio.rs
+@@ -51,7 +51,6 @@ async fn stdio_admission_refusal_writes_one_record() {
+             session_id: "d3a-stdio",
+             channel: &crate::gateway::input_bridge::NoClientChannel,
+             handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-            tasks: None,
+         },
+         &super::super::StdioTelemetry::default(),
+     )
+diff --git a/src/gateway/server/tests/mod.rs b/src/gateway/server/tests/mod.rs
+index bce83e62a..746095f56 100644
+--- a/src/gateway/server/tests/mod.rs
++++ b/src/gateway/server/tests/mod.rs
+@@ -57,7 +57,6 @@ mod owner4_stdio_policy;
+ 
+ // MIK-7272.LIFE.1 (docs/design/2026-09-30-sub4-stdio-owner-test-plan.md, I3).
+ mod life1_stdio_cancel;
+-mod owner2_stdio_tasks;
+ 
+ // #2480: a stdio idempotent replay writes its invocation record.
+ mod stdio_replay_audit;
+diff --git a/src/gateway/server/tests/owner2_stdio_tasks.rs b/src/gateway/server/tests/owner2_stdio_tasks.rs
+deleted file mode 100644
+index 98893fcc6..000000000
+--- a/src/gateway/server/tests/owner2_stdio_tasks.rs
++++ /dev/null
+@@ -1,486 +0,0 @@
+-// SPDX-FileCopyrightText: 2026 Mikko Parkkola
+-// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+-//! MIK-7272.OWNER.2, in-crate rows U1–U6 of the I4 test plan
+-//! (`docs/design/2026-09-30-sub4-stdio-owner-test-plan.md`; design D6 rev 5).
+-//! Every task here is created through the stdio intent path, never seeded.
+-
+-use std::sync::Arc;
+-use std::sync::atomic::{AtomicUsize, Ordering};
+-use std::time::Duration;
+-
+-use serde_json::{Value, json};
+-
+-use super::super::stdio_tasks::{self, IntentRequest, StdioTasks};
+-use crate::config::{BackendConfig, Config, TransportConfig};
+-use crate::gateway::Gateway;
+-use crate::gateway::meta_mcp::LOCAL_OPERATOR_PRINCIPAL;
+-use crate::gateway::task_route::{TaskOwnerText, TaskRoute};
+-use crate::gateway::task_service::TaskIntent;
+-use crate::protocol::RequestId;
+-use crate::protocol::meta::Declared;
+-use crate::protocol::mrtr::RetryFields;
+-use crate::security::{ToolPolicy, ToolPolicyConfig};
+-
+-const BACKEND: &str = "fixture";
+-const TOOL: &str = "echo";
+-const DENIED: &str = "forbidden";
+-
+-/// A counting backend answering every tool at once.
+-async fn backend() -> (String, Arc<AtomicUsize>) {
+-    let rounds = Arc::new(AtomicUsize::new(0));
+-    let counted = Arc::clone(&rounds);
+-    let app = axum::Router::new().route(
+-        "/",
+-        axum::routing::post(move |axum::Json(request): axum::Json<Value>| {
+-            let counted = Arc::clone(&counted);
+-            async move {
+-                let result = match request.get("method").and_then(Value::as_str) {
+-                    Some("initialize") => json!({
+-                        "protocolVersion": "2025-06-18",
+-                        "capabilities": {"tools": {}},
+-                        "serverInfo": {"name": BACKEND, "version": "0"},
+-                    }),
+-                    Some("tools/list") => json!({"tools": [
+-                        {"name": TOOL, "inputSchema": {"type": "object"}},
+-                        {"name": DENIED, "inputSchema": {"type": "object"}},
+-                    ]}),
+-                    Some("tools/call") => {
+-                        counted.fetch_add(1, Ordering::SeqCst);
+-                        json!({"content": [{"type": "text", "text": "done"}]})
+-                    }
+-                    _ => json!({}),
+-                };
+-                axum::Json(json!({"jsonrpc": "2.0", "id": request.get("id"), "result": result}))
+-            }
+-        }),
+-    );
+-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+-        .await
+-        .expect("bind fixture");
+-    let address = listener.local_addr().expect("fixture address");
+-    tokio::spawn(async move { drop(axum::serve(listener, app).await) });
+-    (format!("http://{address}/"), rounds)
+-}
+-
+-/// A stdio task store over a production-built `MetaMcp`, under `policy`.
+-struct Fixture {
+-    tasks: Arc<StdioTasks>,
+-    meta: Arc<crate::gateway::meta_mcp::MetaMcp>,
+-    policy: Arc<ToolPolicy>,
+-    mtls: Arc<crate::mtls::MtlsPolicy>,
+-    rounds: Arc<AtomicUsize>,
+-    store: tempfile::TempDir,
+-    _data: tempfile::TempDir,
+-}
+-
+-async fn fixture(policy: Option<ToolPolicy>) -> Fixture {
+-    let (url, rounds) = backend().await;
+-    let store = tempfile::tempdir().expect("store root");
+-    let mut config = Config::default();
+-    config.tasks.store_dir = store.path().display().to_string();
+-    config.backends.insert(
+-        BACKEND.to_string(),
+-        BackendConfig {
+-            enabled: true,
+-            transport: TransportConfig::Http {
+-                http_url: url,
+-                streamable_http: true,
+-                protocol_version: None,
+-            },
+-            ..BackendConfig::default()
+-        },
+-    );
+-    let data = tempfile::tempdir().expect("data dir");
+-    let built = Gateway::new(config.clone())
+-        .await
+-        .expect("the production constructor accepts this configuration")
+-        .with_data_dir(data.path().to_path_buf())
+-        .build_meta_mcp()
+-        .await
+-        .expect("the production builder accepts this configuration");
+-    let tool_policy = policy.map_or(built.tool_policy, Arc::new);
+-    let (tasks, _expiry) = stdio_tasks::open(
+-        &config,
+-        &crate::config::EnvOverlay::default(),
+-        &built.meta_mcp,
+-        &tool_policy,
+-    )
+-    .await
+-    .expect("the stdio store opens");
+-    Fixture {
+-        tasks,
+-        meta: built.meta_mcp,
+-        policy: tool_policy,
+-        mtls: built.mtls_policy,
+-        rounds,
+-        store,
+-        _data: data,
+-    }
+-}
+-
+-fn keyed(key: &str) -> RetryFields {
+-    RetryFields {
+-        idempotency_key: Some(key.to_owned()),
+-        ..RetryFields::default()
+-    }
+-}
+-
+-/// The intent stdio builds for a keyed task-augmented `gateway_invoke`.
+-fn intent(tasks: &StdioTasks, tool: &str, retry: &RetryFields) -> TaskIntent {
+-    let arguments = json!({"server": BACKEND, "tool": tool, "arguments": {}});
+-    tasks
+-        .intent(&IntentRequest {
+-            id: RequestId::Number(1),
+-            tool_name: "gateway_invoke",
+-            arguments: &arguments,
+-            is_modern: true,
+-            retry,
+-            input_capabilities: Declared::NONE,
+-            session_id: super::super::STDIO_SESSION_ID,
+-            protocol_revision: None,
+-        })
+-        .expect("a keyed modern call is accepted")
+-        .expect("a dispatchable tool becomes a task")
+-}
+-
+-/// U1: the worker's rebuilt context keeps the stdio mark, so the reserved
+-/// owner keys the call's cache and retry entries and provenance is the local
+-/// transport. The pinned path: without the carry the owner falls away.
+-#[tokio::test]
+-async fn a_stdio_task_dispatch_keeps_its_owner_mark() {
+-    let fixture = fixture(None).await;
+-    let retry = keyed("u1");
+-    let intent = intent(&fixture.tasks, TOOL, &retry);
+-    let live = intent.owned.host().upgrade().expect("the host is alive");
+-    let authorizer = live.authorizer(intent.owned.authorizer());
+-    let caller = intent.owned.dispatch_context(&live, &authorizer);
+-    assert_eq!(caller.owner_principal(), Some(LOCAL_OPERATOR_PRINCIPAL));
+-    assert_eq!(
+-        caller.provenance(),
+-        crate::identity_propagation::CallerProvenance::LocalTransport
+-    );
+-    assert!(
+-        matches!(
+-            authorizer,
+-            crate::gateway::task_service::host::HostAuthorizer::Stdio(_)
+-        ),
+-        "a stdio task is authorized as stdio, never as HTTP"
+-    );
+-}
+-
+-/// U3: HTTP owner text cannot name the local operator's task.
+-#[tokio::test]
+-async fn http_owner_text_cannot_name_the_local_operator() {
+-    let fixture = fixture(None).await;
+-    let created = settle(&fixture, TOOL, "u3").await;
+-    let operator = TaskOwnerText::LocalOperator;
+-    assert!(
+-        reads(&fixture.tasks, &operator, &created).await,
+-        "the local operator reads its own task"
+-    );
+-    for text in [
+-        "\0local-operator.v1",
+-        "\0",
+-        "\0local-operator.v1x",
+-        "stdio",
+-        "local:auth-disabled:tasks:v1",
+-        "credential:0123456789abcdef",
+-    ] {
+-        let owner = TaskOwnerText::Http(text.to_owned());
+-        assert!(
+-            !reads(&fixture.tasks, &owner, &created).await,
+-            "HTTP owner {text:?} reached the stdio task"
+-        );
+-    }
+-}
+-
+-/// U4: a worker that outlives its stdio session cannot reach the host.
+-#[tokio::test]
+-async fn a_stdio_worker_outliving_its_session_settles_before_dispatch() {
+-    let fixture = fixture(None).await;
+-    let retry = keyed("u4");
+-    let intent = intent(&fixture.tasks, TOOL, &retry);
+-    let Fixture { tasks, store, .. } = fixture;
+-    drop(tasks);
+-    assert!(
+-        intent.owned.host().upgrade().is_none(),
+-        "the session held the only strong reference"
+-    );
+-    drop(store);
+-}
+-
+-/// A modern `gateway_invoke` of `tool`, keyed `key`, task-augmented when `task`.
+-fn modern_call(id: u64, tool: &str, key: &str, task: bool) -> Value {
+-    let mut params = json!({
+-        "name": "gateway_invoke",
+-        "arguments": {"server": BACKEND, "tool": tool, "arguments": {}},
+-        "_meta": {
+-            "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+-            "io.modelcontextprotocol/clientCapabilities":
+-                {"extensions": {"io.modelcontextprotocol/tasks": {}}},
+-            "io.modelcontextprotocol/clientInfo": {"name": "owner2", "version": "1"},
+-            "io.mcp-gateway/idempotency-key": key,
+-        },
+-    });
+-    if task {
+-        params["task"] = json!({});
+-    }
+-    json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params})
+-}
+-
+-/// One request through the stdio dispatcher, with this fixture's store.
+-async fn dispatch(fixture: &Fixture, request: Value) -> Value {
+-    Gateway::dispatch_single_with_sink(
+-        &fixture.meta,
+-        &fixture.policy,
+-        &fixture.mtls,
+-        request,
+-        super::super::StdioClient {
+-            session_id: super::super::STDIO_SESSION_ID,
+-            channel: &crate::gateway::input_bridge::NoClientChannel,
+-            handshake_capabilities: Declared::NONE,
+-            tasks: Some(&fixture.tasks),
+-        },
+-        &super::super::StdioTelemetry::default(),
+-    )
+-    .await
+-    .expect("a request is answered")
+-}
+-
+-/// Create a task through the stdio intent path and wait until it is terminal.
+-async fn settle(fixture: &Fixture, tool: &str, key: &str) -> String {
+-    let created = dispatch(fixture, modern_call(1, tool, key, true)).await;
+-    let id = created
+-        .pointer("/result/taskId")
+-        .and_then(Value::as_str)
+-        .unwrap_or_else(|| panic!("a task handle: {created}"))
+-        .to_owned();
+-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+-    loop {
+-        let task = fixture
+-            .tasks
+-            .service
+-            .get(LOCAL_OPERATOR_PRINCIPAL, &id)
+-            .expect("the local operator owns its task");
+-        if matches!(
+-            task.task.status(),
+-            crate::protocol::tasks::TaskStatus::Completed
+-                | crate::protocol::tasks::TaskStatus::Failed
+-                | crate::protocol::tasks::TaskStatus::Cancelled
+-        ) {
+-            return id;
+-        }
+-        assert!(
+-            tokio::time::Instant::now() < deadline,
+-            "task {id} not terminal"
+-        );
+-        tokio::time::sleep(Duration::from_millis(20)).await;
+-    }
+-}
+-
+-/// Whether `owner` reads task `id` through the shared route.
+-async fn reads(tasks: &StdioTasks, owner: &TaskOwnerText, id: &str) -> bool {
+-    let route = TaskRoute {
+-        service: &tasks.service,
+-        executor: &tasks.executor,
+-        owner,
+-    };
+-    let answer = route
+-        .get(
+-            RequestId::Number(9),
+-            Some(&json!({"taskId": id})),
+-            |_| std::future::ready(()),
+-            |_| None,
+-        )
+-        .await;
+-    answer.error.is_none()
+-}
+-
+-/// U2: a stdio task's inner call is response-cached under the operator, so a
+-/// synchronous repeat of the same call is served without a second round.
+-/// Without the carried mark the task's cache principal is unresolved, nothing
+-/// is stored, and the repeat reaches the backend again.
+-#[tokio::test]
+-async fn a_stdio_task_s_inner_call_is_cached_under_the_operator() {
+-    let fixture = fixture(None).await;
+-    settle(&fixture, TOOL, "u2-task").await;
+-    assert_eq!(fixture.rounds.load(Ordering::SeqCst), 1);
+-    let repeat = dispatch(&fixture, modern_call(2, TOOL, "u2-sync", false)).await;
+-    assert!(repeat.get("error").is_none(), "{repeat}");
+-    assert_eq!(
+-        fixture.rounds.load(Ordering::SeqCst),
+-        1,
+-        "the synchronous repeat is a cache hit: {repeat}"
+-    );
+-}
+-
+-/// U5: a stdio task runs under the current tool policy.
+-#[tokio::test]
+-async fn a_stdio_task_runs_under_the_current_tool_policy() {
+-    let denying = ToolPolicy::from_config(&ToolPolicyConfig {
+-        deny: vec![DENIED.to_string()],
+-        ..ToolPolicyConfig::default()
+-    });
+-    let fixture = fixture(Some(denying)).await;
+-    // Settled terminal by its own worker: the authorizer refused it.
+-    settle(&fixture, DENIED, "u5-denied").await;
+-    assert_eq!(
+-        fixture.rounds.load(Ordering::SeqCst),
+-        0,
+-        "the denied call never ran"
+-    );
+-    settle(&fixture, TOOL, "u5-neighbour").await;
+-    assert_eq!(
+-        fixture.rounds.load(Ordering::SeqCst),
+-        1,
+-        "the neighbour ran"
+-    );
+-}
+-
+-/// U6: EOF releases the stdio store's lease before `run_stdio_on` returns.
+-#[tokio::test]
+-async fn stdio_eof_releases_the_store_lease_before_returning() {
+-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+-    let (url, _rounds) = backend().await;
+-    let store = tempfile::tempdir().expect("store root");
+-    let mut config = Config::default();
+-    config.tasks.store_dir = store.path().display().to_string();
+-    config.backends.insert(
+-        BACKEND.to_string(),
+-        BackendConfig {
+-            enabled: true,
+-            transport: TransportConfig::Http {
+-                http_url: url,
+-                streamable_http: true,
+-                protocol_version: None,
+-            },
+-            ..BackendConfig::default()
+-        },
+-    );
+-    let data = tempfile::tempdir().expect("data dir");
+-    let gateway = Gateway::new(config.clone())
+-        .await
+-        .expect("gateway boots")
+-        .with_data_dir(data.path().to_path_buf());
+-    let (mut stdin, input) = tokio::io::duplex(64 * 1024);
+-    let (output, reader) = tokio::io::duplex(1 << 20);
+-    let served = tokio::spawn(async move { gateway.run_stdio_on(input, output, None).await });
+-    let mut lines = BufReader::new(reader).lines();
+-    let handshake = json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+-        "protocolVersion": "2025-06-18", "capabilities": {},
+-        "clientInfo": {"name": "owner2", "version": "1"}}});
+-    stdin
+-        .write_all(format!("{handshake}\n").as_bytes())
+-        .await
+-        .expect("write");
+-    tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+-        .await
+-        .expect("handshake answered in time")
+-        .expect("read");
+-    let created = modern_call(1, TOOL, "u6", true);
+-    stdin
+-        .write_all(format!("{created}\n").as_bytes())
+-        .await
+-        .expect("write");
+-    let answer = tokio::time::timeout(Duration::from_secs(10), lines.next_line())
+-        .await
+-        .expect("answered in time")
+-        .expect("read")
+-        .expect("a line");
+-    assert!(answer.contains("taskId"), "a task was created: {answer}");
+-    drop(stdin);
+-    tokio::time::timeout(Duration::from_secs(40), served)
+-        .await
+-        .expect("EOF returns within the bound")
+-        .expect("no panic")
+-        .expect("run_stdio_on returns Ok");
+-    let reopened = crate::gateway::task_service::open_runtime(
+-        &stdio_tasks::store_dir(&config),
+-        1,
+-        crate::gateway::task_service::StoreLimits::default(),
+-        Arc::new(
+-            crate::gateway::subscription_registry::SubscriptionRegistry::new(
+-                1,
+-                crate::gateway::auth::AuthState {
+-                    auth_config: Arc::new(
+-                        crate::gateway::auth::ResolvedAuthConfig::try_from_config(
+-                            &config.auth,
+-                            &crate::config::EnvOverlay::default(),
+-                        )
+-                        .expect("auth config"),
+-                    ),
+-                    key_server: None,
+-                    dashboard_bootstrap: Arc::new(crate::gateway::auth::DashboardBootstrap::new()),
+-                    tls_enabled: false,
+-                    live_config: Arc::new(crate::config_reload::LiveConfig::new(config.clone())),
+-                },
+-            ),
+-        ),
+-    )
+-    .await;
+-    assert!(
+-        reopened.is_ok(),
+-        "the lease is free once run_stdio_on returned"
+-    );
+-}
+-
+-/// U7: a `tasks/*` method the stdio body does not name is not found, never
+-/// handled as one it does (a cancel, say) on the caller's task id.
+-#[tokio::test]
+-async fn an_unnamed_tasks_method_fails_closed() {
+-    let fixture = fixture(None).await;
+-    let id = settle(&fixture, TOOL, "u7").await;
+-    let policy = ToolPolicy::default();
+-    let authorizer = crate::gateway::authz::ToolPolicyAuthorizer {
+-        tool_policy: &policy,
+-    };
+-    let retry = RetryFields::default();
+-    let caller = Gateway::build_stdio_caller_context(
+-        true,
+-        None,
+-        &authorizer,
+-        &retry,
+-        &crate::protocol::meta::RequestShape::Legacy,
+-        super::super::StdioClient {
+-            session_id: super::super::STDIO_SESSION_ID,
+-            channel: &crate::gateway::input_bridge::NoClientChannel,
+-            handshake_capabilities: Declared::NONE,
+-            tasks: Some(&fixture.tasks),
+-        },
+-    );
+-    let answer = fixture
+-        .tasks
+-        .dispatch(
+-            "tasks/list",
+-            RequestId::Number(7),
+-            Some(&json!({"taskId": id})),
+-            &caller,
+-            super::super::STDIO_SESSION_ID,
+-        )
+-        .await;
+-    assert_eq!(
+-        answer.error.as_ref().map(|error| error.code),
+-        Some(-32601),
+-        "{answer:?}"
+-    );
+-}
+-
+-/// U8: a legacy `tools/call` carrying a `task` member is answered
+-/// synchronously, as before stdio had a store: a legacy shape cannot declare
+-/// the extension, so it is neither refused nor made a task.
+-#[tokio::test]
+-async fn a_legacy_task_member_is_answered_synchronously() {
+-    let fixture = fixture(None).await;
+-    let legacy = json!({"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {
+-        "name": "gateway_invoke",
+-        "arguments": {"server": BACKEND, "tool": TOOL, "arguments": {}},
+-        "task": {},
+-    }});
+-    let answer = dispatch(&fixture, legacy).await;
+-    assert!(answer.get("error").is_none(), "not refused: {answer}");
+-    assert!(
+-        answer.pointer("/result/taskId").is_none(),
+-        "not a task: {answer}"
+-    );
+-    assert_eq!(fixture.rounds.load(Ordering::SeqCst), 1, "{answer}");
+-}
+diff --git a/src/gateway/server/tests/owner3_stdio_keying.rs b/src/gateway/server/tests/owner3_stdio_keying.rs
+index 3985ff492..be26c3402 100644
+--- a/src/gateway/server/tests/owner3_stdio_keying.rs
++++ b/src/gateway/server/tests/owner3_stdio_keying.rs
+@@ -176,7 +176,6 @@ async fn dispatch(fixture: &Fixture, request: Value) -> Value {
+             session_id: SESSION,
+             channel: &crate::gateway::input_bridge::NoClientChannel,
+             handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-            tasks: None,
+         },
+         &super::super::StdioTelemetry::default(),
+     )
+diff --git a/src/gateway/server/tests/owner4_stdio_policy.rs b/src/gateway/server/tests/owner4_stdio_policy.rs
+index 6bd24c9e7..443ede83c 100644
+--- a/src/gateway/server/tests/owner4_stdio_policy.rs
++++ b/src/gateway/server/tests/owner4_stdio_policy.rs
+@@ -170,7 +170,6 @@ async fn dispatch(stdio: &Stdio, policy: &Arc<ToolPolicy>, request: Value) -> Va
+             session_id: SESSION,
+             channel: &crate::gateway::input_bridge::NoClientChannel,
+             handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-            tasks: None,
+         },
+         &super::super::StdioTelemetry::default(),
+     )
+diff --git a/src/gateway/server/tests/owner5_stdio_context.rs b/src/gateway/server/tests/owner5_stdio_context.rs
+index ef3d3b9a9..89b318a7a 100644
+--- a/src/gateway/server/tests/owner5_stdio_context.rs
++++ b/src/gateway/server/tests/owner5_stdio_context.rs
+@@ -43,7 +43,6 @@ fn real_stdio_context_carries_principal_and_no_personal_identity() {
+             session_id: super::super::STDIO_SESSION_ID,
+             channel: &crate::gateway::input_bridge::NoClientChannel,
+             handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-            tasks: None,
+         },
+     );
+ 
+diff --git a/src/gateway/server/tests/signing_nonce_allocations.rs b/src/gateway/server/tests/signing_nonce_allocations.rs
+index 02f2b1792..78c009214 100644
+--- a/src/gateway/server/tests/signing_nonce_allocations.rs
++++ b/src/gateway/server/tests/signing_nonce_allocations.rs
+@@ -80,7 +80,6 @@ async fn dispatch(fixture: &Fixture, request: Value) -> Value {
+             session_id: SESSION,
+             channel: &crate::gateway::input_bridge::NoClientChannel,
+             handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-            tasks: None,
+         },
+         &super::super::StdioTelemetry::default(),
+     )
+diff --git a/src/gateway/server/tests/stdio_replay_audit.rs b/src/gateway/server/tests/stdio_replay_audit.rs
+index 2ad981600..c56dfcd73 100644
+--- a/src/gateway/server/tests/stdio_replay_audit.rs
++++ b/src/gateway/server/tests/stdio_replay_audit.rs
+@@ -26,7 +26,6 @@ async fn dispatch(fixture: &Fixture, request: Value) -> Value {
+             session_id: SESSION,
+             channel: &crate::gateway::input_bridge::NoClientChannel,
+             handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-            tasks: None,
+         },
+         &super::super::StdioTelemetry::default(),
+     )
+diff --git a/src/gateway/server/tests/unkeyed_admission.rs b/src/gateway/server/tests/unkeyed_admission.rs
+index e08c4d373..d136b38ca 100644
+--- a/src/gateway/server/tests/unkeyed_admission.rs
++++ b/src/gateway/server/tests/unkeyed_admission.rs
+@@ -26,7 +26,6 @@ async fn dispatch(fixture: &Fixture, request: Value) -> Value {
+             session_id: SESSION,
+             channel: &crate::gateway::input_bridge::NoClientChannel,
+             handshake_capabilities: crate::protocol::meta::Declared::NONE,
+-            tasks: None,
+         },
+         &super::super::StdioTelemetry::default(),
+     )
+diff --git a/src/gateway/task_route.rs b/src/gateway/task_route.rs
+deleted file mode 100644
+index 6625dc5d7..000000000
+--- a/src/gateway/task_route.rs
++++ /dev/null
+@@ -1,253 +0,0 @@
+-// SPDX-FileCopyrightText: 2026 Mikko Parkkola
+-// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+-//! The `tasks/*` bodies both transports serve (MIK-7272.OWNER.2, design D6
+-//! rev 5 items 3–4, `docs/design/2026-09-30-sub4-stdio-owner.md`).
+-//!
+-//! HTTP and stdio differ only in who owns a task and in how a read is
+-//! re-authorized before delivery; both are handed in. Everything an owner
+-//! lookup, a round or a cancel says is decided here, once.
+-
+-use std::future::Future;
+-use std::sync::Arc;
+-
+-use serde_json::{Value, json};
+-
+-use crate::gateway::task_service::{
+-    CommittedTask, InputOutcome, OwnedCallerContext, ServiceError, TaskExecutor, TaskService,
+-};
+-use crate::protocol::tasks::Task;
+-use crate::protocol::{JsonRpcResponse, RequestId};
+-
+-/// Who asks. HTTP owner text comes from the route (`oidc:…`, `credential:…`
+-/// or the auth-disabled constant) and can never name the stdio operator: a
+-/// NUL-prefixed text is refused here, at the one place HTTP owner text enters
+-/// the task surface (invariant I-OWN).
+-pub(crate) enum TaskOwnerText {
+-    Http(String),
+-    LocalOperator,
+-}
+-
+-impl TaskOwnerText {
+-    /// The principal the store keys on, or `None` for a refused HTTP text,
+-    /// which every lookup answers as an absent task.
+-    pub(crate) fn text(&self) -> Option<&str> {
+-        match self {
+-            Self::Http(text) => Some(text.as_str())
+-                .filter(|text| !text.starts_with(crate::gateway::meta_mcp::LOCAL_OPERATOR_PREFIX)),
+-            Self::LocalOperator => Some(crate::gateway::meta_mcp::LOCAL_OPERATOR_PRINCIPAL),
+-        }
+-    }
+-}
+-
+-/// The store and executor one route serves from.
+-pub(crate) struct TaskRoute<'a> {
+-    pub(crate) service: &'a TaskService,
+-    pub(crate) executor: &'a Arc<TaskExecutor>,
+-    pub(crate) owner: &'a TaskOwnerText,
+-}
+-
+-/// Tools that may be handed to the worker after the confirmation gate.
+-pub(crate) fn is_task_dispatchable(
+-    meta_mcp: &crate::gateway::meta_mcp::MetaMcp,
+-    tool_name: &str,
+-) -> bool {
+-    matches!(
+-        tool_name,
+-        "gateway_invoke" | "gateway_execute" | "gateway_run_playbook"
+-    ) || meta_mcp.surfaced_tool_server(tool_name).is_some()
+-}
+-
+-/// The `taskId` a task method names, if it names one.
+-pub(crate) fn task_id_param(params: Option<&Value>) -> Option<&str> {
+-    params?.get("taskId")?.as_str()
+-}
+-
+-/// The one answer a caller gets for a task that is absent, or that belongs to
+-/// another principal.
+-///
+-/// Deliberately carries no id: a message naming the task would let a caller
+-/// tell "not yours" from "never existed", which is the whole disclosure the
+-/// ownership rule exists to prevent.
+-pub(crate) fn missing_task_error(id: RequestId) -> JsonRpcResponse {
+-    JsonRpcResponse::error(Some(id), -32602, "no such task")
+-}
+-
+-/// `Task::wire()` plus the envelope discriminator the arm supplies.
+-pub(crate) fn task_envelope(task: &Task, result_type: &str) -> Value {
+-    let mut value = serde_json::to_value(task.wire()).unwrap_or(Value::Null);
+-    if let Some(object) = value.as_object_mut() {
+-        object.insert("resultType".into(), json!(result_type));
+-    }
+-    value
+-}
+-
+-fn ack_complete() -> Value {
+-    json!({ "resultType": "complete" })
+-}
+-
+-fn store_unavailable(id: RequestId) -> JsonRpcResponse {
+-    JsonRpcResponse::error(Some(id), -32603, "task store unavailable")
+-}
+-
+-impl TaskRoute<'_> {
+-    fn lookup(&self, task_id: &str) -> Result<CommittedTask, ServiceError> {
+-        let owner = self.owner.text().ok_or(ServiceError::NotFound)?;
+-        self.service.get(owner, task_id)
+-    }
+-
+-    /// `tasks/get`. The owner-scoped lookup comes FIRST, so a foreign or
+-    /// missing task causes nothing below it. `recover` runs for a working task
+-    /// (HTTP's bounded upstream read; nothing on stdio). `refuse` is the
+-    /// transport's delivery check on the ONE snapshot returned.
+-    pub(crate) async fn get<'p, R>(
+-        &self,
+-        id: RequestId,
+-        params: Option<&'p Value>,
+-        recover: impl FnOnce(&'p str) -> R,
+-        refuse: impl FnOnce(&CommittedTask) -> Option<JsonRpcResponse>,
+-    ) -> JsonRpcResponse
+-    where
+-        R: Future<Output = ()>,
+-    {
+-        let Some(task_id) = task_id_param(params) else {
+-            return missing_task_error(id);
+-        };
+-        let committed = match self.lookup(task_id) {
+-            Ok(committed) => committed,
+-            Err(ServiceError::NotFound) => return missing_task_error(id),
+-            Err(_) => return store_unavailable(id),
+-        };
+-        if committed.task.status() == crate::protocol::tasks::TaskStatus::Working {
+-            recover(task_id).await;
+-        }
+-        match self.lookup(task_id) {
+-            Ok(current) => refuse(&current).unwrap_or_else(|| {
+-                JsonRpcResponse::success(id, task_envelope(&current.task, "complete"))
+-            }),
+-            Err(ServiceError::NotFound) => missing_task_error(id),
+-            Err(_) => store_unavailable(id),
+-        }
+-    }
+-
+-    /// `tasks/update`. `caller` builds the resume's context from THIS update
+-    /// request's live identity, never the context that created the task.
+-    pub(crate) async fn update(
+-        &self,
+-        id: RequestId,
+-        params: Option<&Value>,
+-        caller: impl FnOnce(&str) -> OwnedCallerContext,
+-    ) -> JsonRpcResponse {
+-        let Some(task_id) = task_id_param(params) else {
+-            return missing_task_error(id);
+-        };
+-        let Some(owner) = self.owner.text() else {
+-            return missing_task_error(id);
+-        };
+-        let answers = params.and_then(|params| params.get("inputResponses"));
+-        if !crate::protocol::mrtr::input_responses_nonempty(answers) {
+-            return match self.service.update(owner, task_id, 0, json!({})).await {
+-                Ok(_) => JsonRpcResponse::success(id, ack_complete()),
+-                Err(ServiceError::NotFound) => missing_task_error(id),
+-                Err(_) => store_unavailable(id),
+-            };
+-        }
+-        let Some(Value::Object(answers)) = answers.cloned() else {
+-            return JsonRpcResponse::error(Some(id), -32602, "inputResponses must be an object");
+-        };
+-        // Owner-scoped first: a foreign or absent task is answered as absent
+-        // before anything about a round is said.
+-        match self.service.get(owner, task_id) {
+-            Ok(current)
+-                if current.task.status() == crate::protocol::tasks::TaskStatus::InputRequired => {}
+-            Ok(current) => return settled_or_no_round(id, &current.task),
+-            Err(ServiceError::NotFound) => return missing_task_error(id),
+-            Err(_) => return store_unavailable(id),
+-        }
+-        let outcome = self
+-            .executor
+-            .provide_input(caller(owner), owner, task_id, answers)
+-            .await;
+-        match outcome {
+-            InputOutcome::Accepted => JsonRpcResponse::success(id, ack_complete()),
+-            // A cancel may have landed between the look-up above and the write.
+-            InputOutcome::NotOutstanding => match self.service.get(owner, task_id) {
+-                Ok(current) => settled_or_no_round(id, &current.task),
+-                Err(ServiceError::NotFound) => missing_task_error(id),
+-                Err(_) => store_unavailable(id),
+-            },
+-            InputOutcome::TooLarge => JsonRpcResponse::error(
+-                Some(id),
+-                -32602,
+-                "inputResponses exceed the task record size limit",
+-            ),
+-            InputOutcome::Busy => JsonRpcResponse::error(Some(id), -32603, "task busy, retry"),
+-            InputOutcome::PoolFull => {
+-                JsonRpcResponse::error(Some(id), -32603, "task worker pool is full, retry")
+-            }
+-            InputOutcome::Closed(closed) => JsonRpcResponse::error(
+-                Some(id),
+-                -32602,
+-                format!(
+-                    "inputResponses refused: {}; the round is closed",
+-                    closed.reason()
+-                ),
+-            ),
+-            InputOutcome::NotFound => missing_task_error(id),
+-            InputOutcome::Unavailable => store_unavailable(id),
+-        }
+-    }
+-
+-    /// `tasks/cancel`.
+-    pub(crate) async fn cancel(&self, id: RequestId, params: Option<&Value>) -> JsonRpcResponse {
+-        let Some(task_id) = task_id_param(params) else {
+-            return missing_task_error(id);
+-        };
+-        let Some(owner) = self.owner.text() else {
+-            return missing_task_error(id);
+-        };
+-        let committed = match self.service.get(owner, task_id) {
+-            Ok(committed) => committed,
+-            Err(ServiceError::NotFound) => return missing_task_error(id),
+-            Err(_) => return store_unavailable(id),
+-        };
+-        match self
+-            .executor
+-            .cancel(owner, task_id, committed.revision)
+-            .await
+-        {
+-            Ok(_) => JsonRpcResponse::success(id, ack_complete()),
+-            Err(ServiceError::NotFound) => missing_task_error(id),
+-            Err(_) => store_unavailable(id),
+-        }
+-    }
+-}
+-
+-/// A late answer to a settled task is told how it settled, with the reason it
+-/// carries (#2429); a live task without a round gets the plain refusal.
+-fn settled_or_no_round(id: RequestId, task: &Task) -> JsonRpcResponse {
+-    let wire = serde_json::to_value(task.wire()).unwrap_or_default();
+-    let status = wire
+-        .get("status")
+-        .and_then(Value::as_str)
+-        .unwrap_or_default();
+-    if !matches!(status, "completed" | "failed" | "cancelled") {
+-        return no_round(id);
+-    }
+-    let reason = wire
+-        .get("statusMessage")
+-        .and_then(Value::as_str)
+-        .map_or_else(String::new, |message| format!(": {message}"));
+-    JsonRpcResponse::error(
+-        Some(id),
+-        -32602,
+-        format!("inputResponses refused: the task is {status}{reason}"),
+-    )
+-}
+-
+-fn no_round(id: RequestId) -> JsonRpcResponse {
+-    JsonRpcResponse::error(
+-        Some(id),
+-        -32602,
+-        "inputResponses are not accepted until an input round is outstanding",
+-    )
+-}
+diff --git a/src/gateway/task_service/execution/context.rs b/src/gateway/task_service/execution/context.rs
+index f6e601393..aac8ed225 100644
+--- a/src/gateway/task_service/execution/context.rs
++++ b/src/gateway/task_service/execution/context.rs
+@@ -8,8 +8,7 @@ use crate::gateway::authz::ToolAuthorizer;
+ use crate::gateway::destructive_confirmation::ConfirmationChannel;
+ use crate::gateway::meta_mcp::dispatch_log::DispatchLog;
+ use crate::gateway::meta_mcp::{Authentication, MetaMcpCallerContext};
+-use crate::gateway::router::OwnedRouterAuthorizer;
+-use crate::gateway::task_service::host::{HostAuthorizer, LiveHost, TaskHost};
++use crate::gateway::router::{AppState, OwnedRouterAuthorizer, RouterAuthorizer};
+ use crate::idempotency::admission::{Mode, Request};
+ use crate::identity_grants::GrantSubject;
+ use crate::key_server::oidc::VerifiedIdentity;
+@@ -20,9 +19,7 @@ use crate::protocol::mrtr::RetryFields;
+ /// context at dispatch. `task` is always `None` on the rebuilt context so the
+ /// worker cannot re-enter admission.
+ pub(crate) struct OwnedCallerContext {
+-    /// The transport the task runs for: the HTTP router's state or the stdio
+-    /// gateway's host (design D6 rev 5 item 1).
+-    host: TaskHost,
++    state: std::sync::Weak<AppState>,
+     authorizer: OwnedRouterAuthorizer,
+     api_key_name: Option<String>,
+     agent_id: Option<crate::security::OwnedProvenAgentId>,
+@@ -64,7 +61,7 @@ pub(crate) struct OwnedCallerContext {
+ impl OwnedCallerContext {
+     #[allow(clippy::too_many_arguments)]
+     pub(crate) fn new(
+-        host: TaskHost,
++        state: std::sync::Weak<AppState>,
+         authorizer: OwnedRouterAuthorizer,
+         api_key_name: Option<String>,
+         agent_id: Option<crate::security::OwnedProvenAgentId>,
+@@ -84,7 +81,7 @@ impl OwnedCallerContext {
+         // one construction site: it is the durable task's owner, not a display
+         // name, and with authentication off no identity renders it.
+         Self {
+-            host,
++            state,
+             authorizer,
+             api_key_name,
+             agent_id,
+@@ -110,8 +107,8 @@ impl OwnedCallerContext {
+         &self.dispatch_log
+     }
+ 
+-    pub(crate) fn host(&self) -> &TaskHost {
+-        &self.host
++    pub(crate) fn state(&self) -> &std::sync::Weak<AppState> {
++        &self.state
+     }
+ 
+     pub(crate) fn authorizer(&self) -> &OwnedRouterAuthorizer {
+@@ -131,10 +128,10 @@ impl OwnedCallerContext {
+     /// - Capabilities are the creating request's.
+     pub(crate) fn dispatch_context<'a>(
+         &'a self,
+-        host: &LiveHost,
+-        authorizer: &'a HostAuthorizer<'a>,
++        state: &'a AppState,
++        authorizer: &'a RouterAuthorizer<'a>,
+     ) -> MetaMcpCallerContext<'a> {
+-        self.dispatch_context_retrying(host, authorizer, &self.retry)
++        self.dispatch_context_retrying(state, authorizer, &self.retry)
+     }
+ 
+     /// The retry fields of one input-round continuation: the gateway-sealed
+@@ -156,8 +153,8 @@ impl OwnedCallerContext {
+     /// own fields: the continuation of an input round.
+     pub(crate) fn dispatch_context_retrying<'a>(
+         &'a self,
+-        host: &LiveHost,
+-        authorizer: &'a HostAuthorizer<'a>,
++        _state: &'a AppState,
++        authorizer: &'a RouterAuthorizer<'a>,
+         retry: &'a RetryFields,
+     ) -> MetaMcpCallerContext<'a> {
+         let authorizer: &'a (dyn ToolAuthorizer + Sync) = authorizer;
+@@ -199,10 +196,7 @@ impl OwnedCallerContext {
+                 .as_deref()
+                 .map(crate::security::DeclaredAgentLabel::new),
+             grant_subject: self.grant_subject.clone(),
+-            // The stdio host's mark, so the reserved owner, the cache
+-            // principal and `LocalTransport` provenance survive the rebuild
+-            // (D6 rev 5 item 2). An HTTP host has none.
+-            stdio_nonce: host.stdio_nonce(),
++            stdio_nonce: None,
+             verified_identity: self.verified_identity.as_ref(),
+             is_admin: self.is_admin,
+             input_capabilities: self.input_capabilities,
+diff --git a/src/gateway/task_service/execution/input_round.rs b/src/gateway/task_service/execution/input_round.rs
+index cc9f9de13..760dad3e8 100644
+--- a/src/gateway/task_service/execution/input_round.rs
++++ b/src/gateway/task_service/execution/input_round.rs
+@@ -20,7 +20,7 @@ use super::settlement::{
+ };
+ use super::worker::inspect_settled;
+ use super::{CommitStage, OwnedCallerContext, TaskCall, TaskExecutor, WriteOutcome};
+-use crate::gateway::task_service::host::LiveHost;
++use crate::gateway::router::AppState;
+ use crate::gateway::task_service::record::{CONTINUATION_DEADLINE_MARGIN_SECS, InputRound, Target};
+ use crate::gateway::task_service::store::StoreError;
+ use crate::gateway::task_service::store::input::{ProvideOutcome, RoundClosed};
+@@ -39,7 +39,7 @@ const PRODUCE_SEAM_WAIT: Duration = Duration::from_secs(1);
+ /// The worker's view of one owned task while it settles a response.
+ pub(super) struct Settling<'a> {
+     executor: &'a Arc<TaskExecutor>,
+-    state: &'a LiveHost,
++    state: &'a Arc<AppState>,
+     owned: &'a OwnedCallerContext,
+     call: &'a TaskCall,
+     principal: &'a str,
+@@ -50,7 +50,7 @@ pub(super) struct Settling<'a> {
+ impl<'a> Settling<'a> {
+     pub(super) const fn new(
+         executor: &'a Arc<TaskExecutor>,
+-        state: &'a LiveHost,
++        state: &'a Arc<AppState>,
+         owned: &'a OwnedCallerContext,
+         call: &'a TaskCall,
+         principal: &'a str,
+@@ -171,7 +171,7 @@ impl<'a> Settling<'a> {
+         // The continuation the resume will redeem dies at its own deadline;
+         // a round that could only fail is settled now, never parked.
+         let now = unix_secs(self.executor.service.store.now());
+-        let continuation = self.state.meta_mcp().continuation();
++        let continuation = self.state.meta_mcp.continuation();
+         let Ok(continuation_deadline) =
+             round_deadline(continuation.keyring(), round.request_state.as_deref(), now)
+         else {
+@@ -238,7 +238,7 @@ impl<'a> Settling<'a> {
+ 
+ /// One cancellable dispatch through the invoke funnel, carrying `retry`.
+ async fn dispatch(
+-    state: &LiveHost,
++    state: &Arc<AppState>,
+     owned: &OwnedCallerContext,
+     call: &TaskCall,
+     retry: &RetryFields,
+@@ -247,9 +247,9 @@ async fn dispatch(
+     if *cancel_rx.borrow() {
+         return None;
+     }
+-    let authorizer = state.authorizer(owned.authorizer());
++    let authorizer = owned.authorizer().borrow(state);
+     let caller = owned.dispatch_context_retrying(state, &authorizer, retry);
+-    let dispatched = state.meta_mcp().dispatch_below_gate_native_result(
++    let dispatched = state.meta_mcp.dispatch_below_gate_native_result(
+         RequestId::Number(0),
+         &call.tool,
+         call.arguments.clone(),
+@@ -430,7 +430,7 @@ async fn resume(resume: Resume, mut cancel_rx: watch::Receiver<bool>) {
+     // create path.
+     let _handoff = handoff;
+     let _slot = slot;
+-    let Some(state) = owned.host().upgrade() else {
++    let Some(state) = owned.state().upgrade() else {
+         let event = TaskTransition::Complete(interrupted_before_dispatch());
+         executor.settle_cas(&principal, &id, revision, event).await;
+         return;
+diff --git a/src/gateway/task_service/execution/worker.rs b/src/gateway/task_service/execution/worker.rs
+index 209c98368..a28c5e487 100644
+--- a/src/gateway/task_service/execution/worker.rs
++++ b/src/gateway/task_service/execution/worker.rs
+@@ -74,9 +74,9 @@ pub(super) async fn commit_and_run(
+ fn creation_targets(intent: &TaskIntent, call: &TaskCall) -> Vec<Target> {
+     intent
+         .owned
+-        .host()
++        .state()
+         .upgrade()
+-        .and_then(|host| host.meta_mcp().direct_job(&call.tool, &call.arguments))
++        .and_then(|state| state.meta_mcp.direct_job(&call.tool, &call.arguments))
+         .map(|job| Target {
+             server: job.server,
+             tool: job.tool,
+@@ -117,7 +117,7 @@ async fn run_dispatched(
+     let _slot = slot;
+     let fail_upgrade = executor.fail_state_upgrade(&id);
+     let Some(state) = (!fail_upgrade)
+-        .then(|| intent.owned.host().upgrade())
++        .then(|| intent.owned.state().upgrade())
+         .flatten()
+     else {
+         settle_interrupted(&executor, &principal, &id, revision).await;
+@@ -143,7 +143,7 @@ async fn run_dispatched(
+     // `not_executed` rather than as `unknown`.
+     let mut job = executor
+         .recovery()
+-        .and_then(|_| state.meta_mcp().direct_job(&call.tool, &call.arguments));
++        .and_then(|_| state.meta_mcp.direct_job(&call.tool, &call.arguments));
+     // Trust is a live question with an await in it, so it cannot be a match
+     // guard: asked here, after the shape is known and before anything is armed.
+     // The verdict is computed first and the option cleared after, so nothing
+@@ -186,7 +186,7 @@ async fn run_dispatched(
+         return;
+     }
+ 
+-    let authorizer = state.authorizer(intent.owned.authorizer());
++    let authorizer = intent.owned.authorizer().borrow(&state);
+     let caller = intent.owned.dispatch_context(&state, &authorizer);
+     let session_id = intent.owned.session_id().map(str::to_owned);
+ 
+@@ -198,7 +198,7 @@ async fn run_dispatched(
+     // result rather than the synchronous wrapper: design §4 settles a task on
+     // that result verbatim, `isError` included, and classifies an interim
+     // `input_required` round from it before anything is committed.
+-    let dispatch = state.meta_mcp().dispatch_below_gate_native_result(
++    let dispatch = state.meta_mcp.dispatch_below_gate_native_result(
+         RequestId::Number(0),
+         &call.tool,
+         call.arguments.clone(),
+@@ -277,7 +277,7 @@ async fn run_dispatched(
+ /// does not stop the job, which is why the follow below still runs.
+ async fn follow_upstream_job(
+     executor: &Arc<TaskExecutor>,
+-    state: &crate::gateway::task_service::host::LiveHost,
++    state: &Arc<crate::gateway::router::AppState>,
+     principal: &str,
+     id: &str,
+     revision: u64,
+@@ -353,7 +353,7 @@ async fn follow_upstream_job(
+             // from the same implementation, before the durable settlement.
+             let event =
+                 match state
+-                    .meta_mcp()
++                    .meta_mcp
+                     .recover_task_result(&job.server, &job.tool, None, id, result)
+                 {
+                     Ok(processed) => TaskTransition::Complete(processed),
+@@ -368,7 +368,7 @@ async fn follow_upstream_job(
+         UpstreamAnswer::Failed(error) => {
+             // The failure half of that same processing: the peer's message and
+             // nested data are screened before this settles, keeping the code.
+-            let screened = state.meta_mcp().recover_task_error(
++            let screened = state.meta_mcp.recover_task_error(
+                 &job.server,
+                 &job.tool,
+                 None,
+@@ -492,7 +492,7 @@ async fn settle_descriptor_refused(
+ /// The response firewall on a native task result, under the targets the
+ /// synchronous call would use (#2351): a refusal is what the task settles on.
+ pub(super) fn inspect_settled(
+-    state: &crate::gateway::task_service::host::LiveHost,
++    state: &crate::gateway::router::AppState,
+     call: &TaskCall,
+     id: &str,
+     mut response: crate::protocol::JsonRpcResponse,
+@@ -504,14 +504,14 @@ pub(super) fn inspect_settled(
+         return response;
+     };
+     let backend = crate::gateway::router::backend_tool_targets_for_call(
+-        state.meta_mcp(),
++        &state.meta_mcp,
+         &call.tool,
+         &call.arguments,
+     );
+     let targets =
+         crate::gateway::meta_mcp::response_security::meta_response_targets(&call.tool, &backend);
+     if state
+-        .meta_mcp()
++        .meta_mcp
+         .inspect_task_result(&targets, id, result)
+         .is_err()
+     {
+diff --git a/src/gateway/task_service/host.rs b/src/gateway/task_service/host.rs
+deleted file mode 100644
+index 8f8a176e8..000000000
+--- a/src/gateway/task_service/host.rs
++++ /dev/null
+@@ -1,124 +0,0 @@
+-// SPDX-FileCopyrightText: 2026 Mikko Parkkola
+-// SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+-//! Who a durable task runs for: the HTTP router's state, or the stdio
+-//! gateway's (MIK-7272.OWNER.2, design D6 rev 5 items 1–2,
+-//! `docs/design/2026-09-30-sub4-stdio-owner.md`).
+-//!
+-//! The worker needs only the `MetaMcp` and an authorizer. Each transport keeps
+-//! its own: HTTP's `RouterAuthorizer`, and stdio's `ToolPolicyAuthorizer`, so
+-//! no HTTP rule (mTLS, agent auth, the `Http` audit label) reaches a stdio task.
+-
+-use std::sync::{Arc, Weak};
+-
+-use crate::gateway::StdioNonce;
+-use crate::gateway::auth::QuotaPrincipal;
+-use crate::gateway::authz::{
+-    Decision, ToolAuthorizer, ToolPolicyAuthorizer, ToolTarget, Transport,
+-};
+-use crate::gateway::meta_mcp::MetaMcp;
+-use crate::gateway::router::{AppState, OwnedRouterAuthorizer, RouterAuthorizer};
+-use crate::security::ToolPolicy;
+-
+-/// What a stdio gateway lends its tasks. `run_stdio_on` holds the only strong
+-/// reference, so a worker that outlives the session fails its upgrade and
+-/// settles before dispatch, as an HTTP worker does after shutdown.
+-pub(crate) struct StdioTaskHost {
+-    pub(crate) meta_mcp: Arc<MetaMcp>,
+-    pub(crate) tool_policy: Arc<ToolPolicy>,
+-    /// The transport mark. Only `gateway::server` can mint one, so only a
+-    /// stdio-built host carries it.
+-    pub(crate) nonce: &'static StdioNonce,
+-}
+-
+-pub(crate) enum TaskHost {
+-    Http(Weak<AppState>),
+-    Stdio(Weak<StdioTaskHost>),
+-}
+-
+-impl TaskHost {
+-    pub(crate) fn upgrade(&self) -> Option<LiveHost> {
+-        match self {
+-            Self::Http(state) => state.upgrade().map(LiveHost::Http),
+-            Self::Stdio(host) => host.upgrade().map(LiveHost::Stdio),
+-        }
+-    }
+-}
+-
+-/// A host for the length of one dispatch.
+-pub(crate) enum LiveHost {
+-    Http(Arc<AppState>),
+-    Stdio(Arc<StdioTaskHost>),
+-}
+-
+-impl LiveHost {
+-    pub(crate) fn meta_mcp(&self) -> &Arc<MetaMcp> {
+-        match self {
+-            Self::Http(state) => &state.meta_mcp,
+-            Self::Stdio(host) => &host.meta_mcp,
+-        }
+-    }
+-
+-    /// The mark a rebuilt context carries: `Some` only for a stdio host.
+-    pub(crate) fn stdio_nonce(&self) -> Option<&'static StdioNonce> {
+-        match self {
+-            Self::Http(_) => None,
+-            Self::Stdio(host) => Some(host.nonce),
+-        }
+-    }
+-
+-    /// The transport's own authorizer. `router` is the creating request's
+-    /// captured HTTP identity, which a stdio host ignores.
+-    pub(crate) fn authorizer<'a>(
+-        &'a self,
+-        router: &'a OwnedRouterAuthorizer,
+-    ) -> HostAuthorizer<'a> {
+-        match self {
+-            Self::Http(state) => HostAuthorizer::Http(router.borrow(state)),
+-            Self::Stdio(host) => HostAuthorizer::Stdio(ToolPolicyAuthorizer {
+-                tool_policy: &host.tool_policy,
+-            }),
+-        }
+-    }
+-}
+-
+-pub(crate) enum HostAuthorizer<'a> {
+-    Http(RouterAuthorizer<'a>),
+-    Stdio(ToolPolicyAuthorizer<'a>),
+-}
+-
+-impl ToolAuthorizer for HostAuthorizer<'_> {
+-    fn decide<'a>(&'a self, target: ToolTarget<'a>) -> Decision<'a> {
+-        match self {
+-            Self::Http(inner) => inner.decide(target),
+-            Self::Stdio(inner) => inner.decide(target),
+-        }
+-    }
+-
+-    fn admits_backend(&self, server: &str) -> bool {
+-        match self {
+-            Self::Http(inner) => inner.admits_backend(server),
+-            Self::Stdio(inner) => inner.admits_backend(server),
+-        }
+-    }
+-
+-    fn transport(&self) -> Transport {
+-        match self {
+-            Self::Http(inner) => inner.transport(),
+-            Self::Stdio(inner) => inner.transport(),
+-        }
+-    }
+-
+-    fn caller_name(&self) -> Option<&str> {
+-        match self {
+-            Self::Http(inner) => inner.caller_name(),
+-            Self::Stdio(inner) => inner.caller_name(),
+-        }
+-    }
+-
+-    fn quota_principal(&self) -> Option<&QuotaPrincipal> {
+-        match self {
+-            Self::Http(inner) => inner.quota_principal(),
+-            Self::Stdio(inner) => inner.quota_principal(),
+-        }
+-    }
+-}
+diff --git a/src/gateway/task_service/mod.rs b/src/gateway/task_service/mod.rs
+index 719096cc4..90416619b 100644
+--- a/src/gateway/task_service/mod.rs
++++ b/src/gateway/task_service/mod.rs
+@@ -24,7 +24,6 @@ mod service;
+ mod service_tests;
+ 
+ pub(crate) mod execution;
+-pub(crate) mod host;
+ 
+ #[cfg(test)]
+ mod runtime_tests;

@@ -1,0 +1,13 @@
+diff --git a/src/gateway/server/stdio_tasks.rs b/src/gateway/server/stdio_tasks.rs
+index b3301a231..e1653a4d1 100644
+--- a/src/gateway/server/stdio_tasks.rs
++++ b/src/gateway/server/stdio_tasks.rs
+@@ -191,7 +191,7 @@ impl StdioTasks {
+         {
+             return Ok(None);
+         }
+-        let Some(key) = req.retry.idempotency_key.as_deref() else {
++        let Some(key) = req.retry.idempotency_key.as_deref().or(Some("mutant-key")) else {
+             return Err(Box::new(crate::protocol::JsonRpcResponse::error(
+                 Some(req.id.clone()),
+                 -32602,

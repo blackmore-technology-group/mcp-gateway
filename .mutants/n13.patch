@@ -1,0 +1,14 @@
+diff --git a/src/gateway/server/stdio_tasks.rs b/src/gateway/server/stdio_tasks.rs
+index b3301a231..1061f7b31 100644
+--- a/src/gateway/server/stdio_tasks.rs
++++ b/src/gateway/server/stdio_tasks.rs
+@@ -365,9 +365,6 @@ pub(super) fn task_intent(
+ {
+     // A legacy shape cannot declare an extension, and a legacy `task` member
+     // was always answered synchronously on stdio: it stays so, unrefused.
+-    if !caller.is_modern {
+-        return Ok(None);
+-    }
+     if let Some(refusal) = undeclared(id.clone(), "tools/call", shape) {
+         return Err(Box::new(refusal));
+     }

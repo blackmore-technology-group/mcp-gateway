@@ -1,0 +1,13 @@
+diff --git a/src/gateway/server/stdio_tasks.rs b/src/gateway/server/stdio_tasks.rs
+index b3301a231..065097a7f 100644
+--- a/src/gateway/server/stdio_tasks.rs
++++ b/src/gateway/server/stdio_tasks.rs
+@@ -293,7 +293,7 @@ impl StdioTasks {
+                     })
+                     .await
+             }
+-            "tasks/cancel" => route.cancel(id, params).await,
++            _ => route.cancel(id, params).await,
+             // Fail closed: a method this body does not name is never handled
+             // as one of the three it does.
+             other => crate::protocol::JsonRpcResponse::error(
