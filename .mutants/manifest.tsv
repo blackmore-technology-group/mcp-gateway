@@ -1,0 +1,4 @@
+head_sha	7c174204127728a7c91699266678b280154715c1
+# batch 2 for #2549 on the head above: D1/D2 re-run after the review comment fix (batch 1, run 36821379560, was on 4fe177907)
+D1	linux	d1.patch	--lib -- stdio1_discover_versions::stdio_discover_advertises_2026_when_modern_is_on
+D2	linux	d2.patch	--lib -- stdio1_discover_versions::stdio_discover_hides_2026_when_modern_is_off
