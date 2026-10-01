@@ -1,0 +1,13 @@
+diff --git a/src/gateway/server/task_runtime.rs b/src/gateway/server/task_runtime.rs
+index 07e7a9880..ca9fbd99b 100644
+--- a/src/gateway/server/task_runtime.rs
++++ b/src/gateway/server/task_runtime.rs
+@@ -38,7 +38,7 @@ pub(super) async fn open(
+             logical_bytes: config.tasks.logical_budget_bytes,
+         },
+         subscriptions,
+-        Arc::clone(meta_mcp.execution_admission()),
++        crate::idempotency::admission::ExecutionAdmission::new(Arc::new(|| 0_u64)),
+         managed,
+     )
+     .await

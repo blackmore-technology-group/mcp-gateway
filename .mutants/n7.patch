@@ -1,0 +1,13 @@
+diff --git a/src/gateway/task_service/host.rs b/src/gateway/task_service/host.rs
+index 8f8a176e8..5e1af5f80 100644
+--- a/src/gateway/task_service/host.rs
++++ b/src/gateway/task_service/host.rs
+@@ -75,7 +75,7 @@ impl LiveHost {
+         match self {
+             Self::Http(state) => HostAuthorizer::Http(router.borrow(state)),
+             Self::Stdio(host) => HostAuthorizer::Stdio(ToolPolicyAuthorizer {
+-                tool_policy: &host.tool_policy,
++                tool_policy: Box::leak(Box::new(ToolPolicy::default())),
+             }),
+         }
+     }

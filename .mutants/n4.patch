@@ -1,0 +1,13 @@
+diff --git a/src/gateway/server/stdio_tasks.rs b/src/gateway/server/stdio_tasks.rs
+index 002cfd30a..122b345b0 100644
+--- a/src/gateway/server/stdio_tasks.rs
++++ b/src/gateway/server/stdio_tasks.rs
+@@ -308,7 +308,7 @@ pub(super) fn advertised(
+     if tasks.is_none()
+         && let Some(result) = response.result.as_mut()
+     {
+-        strip_tasks_extension(result);
++        let _ = result;
+     }
+     response
+ }
