@@ -1,0 +1,11 @@
+diff --git a/src/gateway/meta_mcp/admission_tests.rs b/src/gateway/meta_mcp/admission_tests.rs
+--- a/src/gateway/meta_mcp/admission_tests.rs
++++ b/src/gateway/meta_mcp/admission_tests.rs
+@@ -200,7 +200,7 @@ fn set_state_idempotency_is_bound_to_legacy_session() {
+     assert_eq!(
+         error.to_rpc_code(),
+         409,
+-        "reusing a state key in another session must conflict, not replay"
++        "cross-session state key reuse must conflict, not replay"
+     );
+ }
