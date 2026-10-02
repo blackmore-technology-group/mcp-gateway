@@ -532,10 +532,10 @@ impl MetaMcp {
             "profile": profile,
             "arm": crate::projection::projection_key_suffix(self.projection_mode, arm_key),
         });
-        // State is session-local. Keep the active-profile binding above, and
-        // additionally prevent one session from replaying another's result.
+        // Mutation proof for #2505: preserve the representation shape but
+        // erase the caller's actual session identity.
         if tool_name == "gateway_set_state" {
-            representation["session"] = json!(super::session_key(session));
+            representation["session"] = Value::Null;
         }
         representation
     }
